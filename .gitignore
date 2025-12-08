@@ -1,0 +1,19 @@
+# C++ Build Artifacts
+build/
+*.o
+*.out
+*.app
+
+# Python Virtual Environment
+.venv/
+__pycache__/
+*.pyc
+
+# System Files (Mac/Windows)
+.DS_Store
+Thumbs.db
+
+# Optional: Ignore large logs if you want, but keep figures
+data/test
+data/train
+results/
