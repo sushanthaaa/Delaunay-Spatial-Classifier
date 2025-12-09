@@ -3,17 +3,21 @@ build/
 *.o
 *.out
 *.app
-
-# Python Virtual Environment
 .venv/
 __pycache__/
 *.pyc
-
-# System Files (Mac/Windows)
 .DS_Store
 Thumbs.db
 
-# Optional: Ignore large logs if you want, but keep figures
-data/test
+# 1. Ignore Data
 data/train
-results/
+data/test
+
+# 2. Ignore Results (Logs and CSVs)
+results/logs/
+results/*.csv
+results/predictions.csv
+
+# 3. BUT... Allow the Figures (So README works)
+!results/figures/
+!results/figures/*.png
