@@ -1,22 +1,24 @@
-# C++ Build Artifacts
+# --- System & Python Junk ---
+.DS_Store
+Thumbs.db
+.venv/
+__pycache__/
+*.pyc
+.vscode/
+
+# --- C++ Build Artifacts ---
 build/
 *.o
 *.out
 *.app
-.venv/
-__pycache__/
-*.pyc
-.DS_Store
-Thumbs.db
 
-# 1. Ignore Data
-data/train
-data/test
+# --- Data Handling ---
+data/**/*.csv
+!data/train/.gitkeep
+!data/test/.gitkeep
 
-# 2. Ignore Results (Logs and CSVs)
+# --- Results Handling ---
+results/**/*.csv
 results/*.csv
-results/predictions.csv
-
-# 3. BUT... Allow the Figures (So README works)
-!results/
-!data/
+results/logs/
+results/figures/

@@ -3,6 +3,7 @@ import pandas as pd
 import time
 import subprocess
 import os
+import shutil
 import numpy as np
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import SVC
@@ -10,10 +11,9 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.metrics import accuracy_score
 
-# --- UTILS ---
 def load_data(path):
     if not os.path.exists(path):
-        print(f"❌ Error: {path} not found.")
+        print(f"Error: {path} not found.")
         return None, None
     df = pd.read_csv(path, header=None, names=['x', 'y', 'label'])
     return df[['x', 'y']].values, df['label'].values
@@ -26,7 +26,10 @@ def run_static_benchmark(args, root):
     test_X_csv = f"{root}/data/test/{args.dataset}_test_X.csv"
     test_y_csv = f"{root}/data/test/{args.dataset}_test_y.csv"
     cpp_exe = f"{root}/build/main"
-    cpp_out = f"{root}/results/predictions.csv"
+    
+    cpp_clean_out = f"{root}/results/clean_points.csv"
+    cpp_preds_out = f"{root}/results/predictions.csv"
+    final_clean_out = f"{root}/results/{args.dataset}_clean_points.csv"
 
     X_train, y_train = load_data(train_csv)
     X_test, y_true = load_data(test_y_csv)
@@ -34,7 +37,6 @@ def run_static_benchmark(args, root):
 
     if X_train is None: return
 
-    # 1. Python Competitors
     classifiers = {
         "KNN (k=5)": KNeighborsClassifier(n_neighbors=5, algorithm='brute'),
         "SVM (RBF)": SVC(kernel='rbf'),
@@ -52,16 +54,16 @@ def run_static_benchmark(args, root):
         y_pred = clf.predict(X_test_no_label)
         end = time.perf_counter()
         
-        avg_time = ((end - start) / len(X_test)) * 1_000_000 # us
+        avg_time = ((end - start) / len(X_test)) * 1_000_000
         acc = accuracy_score(y_true, y_pred)
         if "KNN" in name: baseline_time = avg_time
         
         results.append({"Algorithm": name, "Accuracy": acc, "Time_us": avg_time})
-        print(f"✅ {name}: {avg_time:.2f} us")
+        print(f"{name}: {avg_time:.2f} us")
 
-    # 2. C++ Delaunay
     print("--- C++ Delaunay (Ours) ---")
-    if os.path.exists(cpp_out): os.remove(cpp_out)
+    if os.path.exists(cpp_preds_out): os.remove(cpp_preds_out)
+    if os.path.exists(cpp_clean_out): os.remove(cpp_clean_out)
     
     cmd = [cpp_exe, "static", train_csv, test_X_csv, f"{root}/results"]
     proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -72,15 +74,17 @@ def run_static_benchmark(args, root):
             try: cpp_time = float(line.split()[-2])
             except: pass
             
-    print(f"✅ C++ Delaunay: {cpp_time:.4f} us")
+    print(f"C++ Delaunay: {cpp_time:.4f} us")
 
-    if os.path.exists(cpp_out):
-        cpp_preds = pd.read_csv(cpp_out, header=None).values.ravel()
+    if os.path.exists(cpp_clean_out):
+        shutil.move(cpp_clean_out, final_clean_out)
+
+    if os.path.exists(cpp_preds_out):
+        cpp_preds = pd.read_csv(cpp_preds_out, header=None).values.ravel()
         if len(cpp_preds) == len(y_true):
             acc = accuracy_score(y_true, cpp_preds)
             results.append({"Algorithm": "**Delaunay (Ours)**", "Accuracy": acc, "Time_us": cpp_time})
 
-    # Print Table
     print("\n" + "="*70)
     print(f"{'Algorithm':<25} | {'Accuracy':<10} | {'Inference (us)':<15} | {'Speedup'}")
     print("-" * 70)
@@ -96,31 +100,30 @@ def run_dynamic_benchmark(args, root):
     base_csv = f"{root}/data/train/{args.dataset}_dynamic_base.csv"
     stream_csv = f"{root}/data/train/{args.dataset}_dynamic_stream.csv"
     
-    # FIX: Unique log file for this dataset to avoid reading stale data
     cpp_log_filename = f"{args.dataset}_dynamic_logs.csv"
-    cpp_log_path = f"{root}/results/logs/{cpp_log_filename}"
+    cpp_log_dir = f"{root}/results/logs"
+    cpp_log_path = f"{cpp_log_dir}/{cpp_log_filename}"
     
+    os.makedirs(cpp_log_dir, exist_ok=True)
+
     X_base, y_base = load_data(base_csv)
     X_stream, y_stream = load_data(stream_csv)
     
     if X_base is None: return
 
-    # 1. Run C++ FIRST to generate the fresh log
-    print("--- Running C++ Algorithm 1/2/3 ---")
+    print("Running C++ Algorithm 1/2/3")
     cpp_exe = f"{root}/build/main"
     
-    # We pass the full path to the log file we want C++ to create
+    if os.path.exists(cpp_log_path): os.remove(cpp_log_path)
+    
     cmd = [cpp_exe, "dynamic", base_csv, stream_csv, cpp_log_path]
-    
-    if os.path.exists(cpp_log_path): os.remove(cpp_log_path) # Clean start
-    
     proc = subprocess.run(cmd, capture_output=True, text=True)
+    
     if proc.returncode != 0:
-        print("❌ C++ Error:", proc.stderr)
+        print("C++ Error:", proc.stderr)
         return
 
-    # 2. Measure Python "Retraining" Cost
-    print("--- Measuring Competitor Retraining Cost ---")
+    print("Measuring Competitor Retraining Cost")
     knn = KNeighborsClassifier(n_neighbors=5)
     svm = SVC(kernel='rbf')
     
@@ -129,8 +132,6 @@ def run_dynamic_benchmark(args, root):
     
     current_X = list(X_base)
     current_y = list(y_base)
-    
-    # Test on a subset to save time
     test_limit = min(50, len(X_stream))
     
     for i in range(test_limit):
@@ -151,9 +152,8 @@ def run_dynamic_benchmark(args, root):
     print(f"⚠️  KNN Avg Retrain: {avg_knn_ns:.0f} ns")
     print(f"⚠️  SVM Avg Retrain: {avg_svm_ns:.0f} ns")
 
-    # 3. Read the FRESH C++ Log
     if not os.path.exists(cpp_log_path):
-        print(f"❌ Error: Log file {cpp_log_path} not found.")
+        print(f"Error: Log file {cpp_log_path} not found.")
         return
 
     df = pd.read_csv(cpp_log_path)
@@ -161,11 +161,10 @@ def run_dynamic_benchmark(args, root):
     avg_move = df[df['operation'] == 'move']['time_ns'].mean()
     avg_delete = df[df['operation'] == 'delete']['time_ns'].mean()
 
-    print(f"✅ Algo 1 (Insert): {avg_insert:.0f} ns")
-    print(f"✅ Algo 3 (Move):   {avg_move:.0f} ns")
-    print(f"✅ Algo 2 (Delete): {avg_delete:.0f} ns")
+    print(f"Algo 1 (Insert): {avg_insert:.0f} ns")
+    print(f"Algo 3 (Move):   {avg_move:.0f} ns")
+    print(f"Algo 2 (Delete): {avg_delete:.0f} ns")
 
-    # 4. Comparison Table
     print("\n" + "="*70)
     print(f"{'Operation':<20} | {'Method':<20} | {'Time (ns)':<15} | {'Speedup'}")
     print("-" * 70)

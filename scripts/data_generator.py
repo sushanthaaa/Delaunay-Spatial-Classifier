@@ -5,10 +5,9 @@ from sklearn import datasets
 from sklearn.decomposition import PCA
 from sklearn.datasets import make_moons, make_blobs
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler  # <--- NEW IMPORT
+from sklearn.preprocessing import StandardScaler
 import os
 
-# --- GENERATION FUNCTIONS ---
 def generate_moons(n_samples=1000, noise=0.1):
     X, y = make_moons(n_samples=n_samples, noise=noise, random_state=42)
     return X, y
@@ -34,11 +33,9 @@ def generate_digits():
     return digits.data, digits.target
 
 def process_data(X, y):
-    # 1. Normalize Features (Crucial for Delaunay distance checks)
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
     
-    # 2. Reduce to 2D using PCA
     pca = PCA(n_components=2)
     X_2d = pca.fit_transform(X_scaled)
     
@@ -57,7 +54,7 @@ def save_csv(X, y, filename):
     if y is not None:
         df['label'] = y
     df.to_csv(filename, index=False, header=False)
-    print(f"✅ Saved: {filename} ({len(X)} points)")
+    print(f"Saved: {filename} ({len(X)} points)")
 
 if __name__ == "__main__":
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -74,7 +71,6 @@ if __name__ == "__main__":
     os.makedirs(f"{args.out_dir}/train", exist_ok=True)
     os.makedirs(f"{args.out_dir}/test", exist_ok=True)
 
-    # 1. Load Raw Data
     if args.type == 'moons': X, y = generate_moons()
     elif args.type == 'blobs': X, y = generate_blobs()
     elif args.type == 'iris': X, y = generate_iris()
@@ -82,24 +78,18 @@ if __name__ == "__main__":
     elif args.type == 'cancer': X, y = generate_cancer()
     elif args.type == 'digits': X, y = generate_digits()
 
-    # 2. Process (Scale + PCA)
-    # Note: Synthetic data is already 2D/scaled, but processing assumes raw high-dim input.
-    # For moons/blobs we skip scaling to preserve their shape, for others we apply it.
     if args.type in ['iris', 'wine', 'cancer', 'digits']:
         X, y = process_data(X, y)
 
-    # 3. Add Noise
     if args.noise > 0:
         X, y = add_noise(X, y, args.noise)
 
-    # 4. Split
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
     save_csv(X_train, y_train, f"{args.out_dir}/train/{args.type}_train.csv")
     save_csv(X_test, None, f"{args.out_dir}/test/{args.type}_test_X.csv")
     save_csv(X_test, y_test, f"{args.out_dir}/test/{args.type}_test_y.csv")
 
-    # 5. Dynamic Split
     if len(X_train) < 200:
         base_size = min(100, int(len(X_train) * 0.8))
     else:

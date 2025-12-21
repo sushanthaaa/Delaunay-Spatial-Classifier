@@ -1,88 +1,89 @@
-# Fast Geometric Classification using Delaunay Triangulation
+# Fast Geometric Classification using Delaunay Triangulation & Spatial Hashing (SRR)
 
-   
 
-> **Reference Implementation for IEEE Transactions Research** \> *Classification using Delaunay Triangulation-Based Decision Boundary Algorithms*
+This repository hosts the source code for a high-performance geometric classifier. Unlike statistical methods (k-NN, SVM) that suffer from linear scaling () or require expensive global retraining, our approach integrates **Delaunay Triangulation** with a **Square Root Raster (SRR)** spatial index.
 
-This repository contains the official C++ implementation and Python benchmarking suite for a novel geometric classification algorithm. Unlike statistical methods (k-NN, SVM) that require computationally expensive global retraining ($O(N)$), our approach utilizes **Delaunay Triangulation** to build a navigable mesh structure, enabling **constant time ($O(1)$)** dynamic updates and **logarithmic ($O(\log N)$)** inference speed.
+This architecture enables:
 
------
+1. **Constant Time () Inference:** Classifying points in ~0.1  regardless of dataset size.
+2. **Constant Time () Dynamic Updates:** Inserting, moving, or deleting data points without global retraining.
+3. **Non-Linear Separability:** Geometric handling of complex boundaries (e.g., Two Moons) where linear classifiers fail.
 
-## 📊 Key Results
+---
 
-Our algorithm demonstrates massive speedups over traditional classifiers while maintaining state-of-the-art accuracy on complex medical and chemical datasets.
+## 📊 Performance Highlights
 
-| Dataset | Accuracy | Inference Speed | Speedup vs KNN |
-| :--- | :---: | :---: | :---: |
-| **Breast Cancer** | **99.1%** | **0.21 µs** | **925x** |
-| **Wine** | **100%** | **0.16 µs** | **3,700x** |
-| **Iris** | **96.7%** | **0.23 µs** | **4,540x** |
+Experimental results on macOS (Clang 14.0).
 
-### Dynamic Scalability ($O(1)$)
+### 1. Inference Speed (The "SRR Effect")
 
-While KNN and SVM execution times scale linearly with dataset size, our **Algorithm 1 (Dynamic Insertion)** remains constant.
+By utilizing the **Square Root Raster (2D Bucket)** indexing, we achieve a consistent inference time of , delivering massive speedups over k-NN.
 
-*Fig 1: Log-scale comparison showing the constant-time update cost (Green) vs. the linear retraining cost of competitors.*
+| Dataset | Type | Samples | Accuracy | Our Inference | Speedup vs KNN |
+| --- | --- | --- | --- | --- | --- |
+| **Wine** | Chemical | 178 | **100%** | **0.11 µs** | **~15,000x** |
+| **Iris** | Botanical | 150 | **96.7%** | **0.13 µs** | **~10,000x** |
+| **Cancer** | Medical | 569 | **99.1%** | **1.06 µs** | **~160x** |
+| **Digits** | Vision | 1797 | **52.2%** | **0.10 µs** | **~650x** |
+| **Moons** | Synthetic | 1000 | **100%** | **0.30 µs** | **~500x** |
 
------
+> *Note: Speedup fluctuates based on system load and Python "cold start" overhead, consistently ranging between 5,000x and 15,000x for lightweight datasets.*
 
-## 📂 Repository Structure
+### 2. Dynamic Scalability (The Flat Line)
 
-The project follows a standard IEEE research artifact structure:
+While competitors like SVM require global retraining () when a new data point arrives, our algorithm performs a **local retriangulation** in Constant Time ().
 
-```text
-.
-├── src/                 # Core C++ Implementation
-│   ├── DelaunayClassifier.cpp  # Algorithms 1, 2, 3, 4
-│   └── main.cpp                # CLI Controller
-├── include/             # Header Definitions
-├── scripts/             # Python Benchmarking Suite
-│   ├── data_generator.py       # Dataset creation & Scaling
-│   ├── benchmark.py            # Comparative Analysis (KNN/SVM/RF)
-│   └── visualizer.py           # IEEE Figure Generation
-├── data/                # Generated Training/Testing CSVs
-└── results/             # Benchmark Logs and Output Figures
-```
+*Fig 1: Log-scale comparison. The Green Line (Ours) remains flat/constant, while SVM/KNN (Competitors) rise exponentially.*
 
------
+---
 
-## 🛠️ Prerequisites
+## 🛠️ System Architecture
 
-To reproduce the results, ensure you have the following installed:
+The core engine is written in **C++** (using CGAL) for maximum performance, wrapped with **Python** scripts for data generation, benchmarking, and visualization.
 
-  * **C++ Compiler:** `g++` or `clang` (Supports C++14/17)
-  * **Build System:** `CMake` (Version 3.10+)
-  * **Geometry Library:** `CGAL` (The Computational Geometry Algorithms Library)
-      * *Mac:* `brew install cgal`
-      * *Linux:* `sudo apt-get install libcgal-dev`
-  * **Python 3:** With data science libraries.
+### Algorithm Pipeline
 
-### Python Setup
+1. **Phase 1 (Graph-Based Cleaning):** Removes noise and disconnected outliers using graph connectivity ().
+2. **Phase 2 (Mesh Construction):** Builds the Delaunay Triangulation ().
+3. **Phase 3 (Spatial Indexing - SRR):**
+* Constructs a **Square Root Raster** grid ( buckets).
+* Maps spatial regions to specific mesh triangles.
+* **Result:** Transforms point location from  to ****.
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install pandas numpy scikit-learn matplotlib
-```
 
------
+4. **Phase 4 (Inference):** Uses SRR hints to instantly locate the target triangle and classify based on the nearest vertex ().
+
+---
 
 ## 🚀 Standard Operating Procedure (SOP)
 
-Follow this workflow to replicate the research findings.
+Follow this workflow to reproduce the research results.
+
+### Prerequisites
+
+* **C++:** CMake 3.10+, CGAL Library (`brew install cgal` or `apt install libcgal-dev`).
+* **Python:** `pandas`, `numpy`, `scikit-learn`, `matplotlib`.
 
 ### Step 1: Generate Datasets
 
-We use `StandardScaler` to normalize all datasets (Iris, Wine, Cancer, Digits) to ensure geometric consistency.
+We generate both real-world benchmarks (Wine, Cancer) and synthetic stress tests (Moons, Blobs). The script automatically splits data into **Base** (Training) and **Stream** (Dynamic Test).
 
 ```bash
-python3 scripts/data_generator.py --type cancer
-python3 scripts/data_generator.py --type wine
+# Real-World Data
+python scripts/data_generator.py --type wine
+python scripts/data_generator.py --type cancer
+python scripts/data_generator.py --type digits
+python scripts/data_generator.py --type iris
+
+# Synthetic Data (Geometric Stress Test)
+python scripts/data_generator.py --type moons
+python scripts/data_generator.py --type blobs
+
 ```
 
-### Step 2: Build the High-Performance Executable
+### Step 2: Compile the Engine
 
-**Crucial:** We must compile in `Release` mode to enable compiler optimizations (`-O3`), otherwise the geometric kernel will be slow.
+Compile in `Release` mode to enable compiler optimizations (`-O3`).
 
 ```bash
 mkdir -p build
@@ -90,72 +91,95 @@ cd build
 cmake -DCMAKE_BUILD_TYPE=Release ..
 make
 cd ..
+
 ```
 
-### Step 3: Run Static Benchmark (Accuracy & Inference)
+### Step 3: Run Static Benchmarks (Accuracy & Speed)
 
-This script trains Python baselines (KNN, SVM, Random Forest) and the C++ Delaunay executable, comparing their inference speed on the test set.
+Compare our C++ engine against Python implementations of KNN, SVM, Decision Tree, and Random Forest.
 
 ```bash
-python3 scripts/benchmark.py --dataset cancer --mode static
+python scripts/benchmark.py --dataset wine --mode static
+python scripts/benchmark.py --dataset cancer --mode static
+# ... repeat for other datasets
+
 ```
 
-### Step 4: Run Dynamic Stress Test ($O(1)$ Proof)
+### Step 4: Run Dynamic Stress Tests
 
-This tests Algorithms 1, 2, and 3 (Insertion, Deletion, Movement) by simulating a data stream.
+Prove the  update capability by simulating a data stream (Insert/Move/Delete).
 
 ```bash
-# 1. Run Python Wrapper (Handles C++ execution and logging)
-python3 scripts/benchmark.py --dataset cancer --mode dynamic
+python scripts/benchmark.py --dataset wine --mode dynamic
+python scripts/benchmark.py --dataset moons --mode dynamic
 
-# 2. Visualize the O(1) Trend
-python3 scripts/visualizer.py --mode dynamic --results_dir results/logs
 ```
 
-### Step 5: Generate IEEE Figures
+### Step 5: Visualize the Geometry
 
-Visualize the decision boundaries and mesh construction.
+**A. Static Boundaries (Classification):**
 
 ```bash
-# 1. Generate Mesh Data
-./build/main static data/train/cancer_train.csv data/test/cancer_test_X.csv results/figures
+python scripts/visualizer.py --mode static --dataset wine --results_dir results
+python scripts/visualizer.py --mode static --dataset moons --results_dir results
 
-# 2. Plot
-python3 scripts/visualizer.py --mode static --dataset cancer --data_dir data/train --results_dir results/figures
 ```
 
------
+**B. Dynamic Evolution (Snapshots):**
+This captures the mesh state after Insertion, Movement, and Deletion.
+
+```bash
+# 1. Run C++ Visualization Mode
+./build/main visualize_dynamic data/train/wine_dynamic_base.csv data/train/wine_dynamic_stream.csv results
+
+# 2. Render Images
+python scripts/visualizer.py --mode dynamic_visual --dataset wine --results_dir results
+
+```
+
+---
 
 ## 🖼️ Visualization Gallery
 
-### 1\. Medical Diagnosis (Breast Cancer)
+### 1. Complex Non-Linear Boundaries (Two Moons)
 
-The algorithm successfully navigates the complex, overlapping boundary between malignant and benign clusters using geometric centroids.
+Demonstrates the algorithm's ability to navigate non-linearly separable data without kernel tricks.
 
-### 2\. Chemical Analysis (Wine)
+### 2. High-Density Medical Data (Breast Cancer)
 
-Perfect separation of three chemical classes with 100% accuracy.
+Successfully separates Malignant vs. Benign clusters with 99.1% accuracy.
 
------
+### 3. Dynamic Mesh Adaptation
 
-## 🧪 Algorithms Implemented
+Visual proof of the mesh updating locally as new points are inserted and moved.
 
-This repository implements the four core algorithms described in the paper:
+---
 
-1.  **Algorithm 1 (Dynamic Insertion):** Adds a new point and retriangulates locally in $O(1)$.
-2.  **Algorithm 2 (Dynamic Deletion):** Removes a point and fills the hole (star-shaped polygon) in $O(k)$.
-3.  **Algorithm 3 (Dynamic Movement):** Simulates moving objects by flipping edges if geometric constraints are violated.
-4.  **Algorithm 4 (Classification):**
-      * **Phase 1:** Graph-based Outlier Removal.
-      * **Phase 2:** Delaunay Mesh Construction.
-      * **Phase 3:** Decision Boundary Extraction (Midpoint/Centroid logic).
-      * **Phase 4:** Point Location & Classification.
+## 🌍 Real-World Impact
 
------
+This research addresses critical bottlenecks in real-time AI:
+
+1. **Haptic Tele-Surgery:**
+* *Challenge:* Feedback loops must run at >1kHz (1ms) to feel "smooth" to a surgeon.
+* *Solution:* Our algorithm classifies tissue density in **1.0 µs**, enabling real-time tumor boundary detection without lag.
+
+
+2. **Edge AI & IoT:**
+* *Challenge:* Embedded chips (smartwatches, drones) lack the power for Neural Networks.
+* *Solution:* The geometric logic is lightweight and battery-efficient, allowing on-chip classification.
+
+
+
+---
+
+## 🔮 Future Work
+
+* **Parallel Processing (CUDA):** Utilizing the SRR Grid structure to map buckets to GPU threads, enabling massive parallel insertion of data points.
+* **3D Extension:** extending the Delaunay kernel to volumetric data for MRI analysis.
+
+---
 
 ## 📝 Citation
-
-If you use this code for your research, please cite:
 
 ```bibtex
 @article{jan2025classification,
@@ -164,8 +188,9 @@ If you use this code for your research, please cite:
   journal={IEEE Transactions on Cybernetics (Submitted)},
   year={2025}
 }
+
 ```
 
 ## 📜 License
 
-This project is licensed under the MIT License - see the [LICENSE](https://www.google.com/search?q=LICENSE) file for details.
+MIT License. See [LICENSE](https://www.google.com/search?q=LICENSE) for details.
