@@ -1,24 +1,107 @@
-# --- System & Python Junk ---
+# ==============================================================================
+# GITIGNORE FOR DELAUNAY TRIANGULATION CLASSIFIER
+# IEEE Publication Standard Repository
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# System Files
+# ------------------------------------------------------------------------------
 .DS_Store
 Thumbs.db
+*.swp
+*.swo
+*~
+
+# ------------------------------------------------------------------------------
+# IDE and Editor
+# ------------------------------------------------------------------------------
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# ------------------------------------------------------------------------------
+# Python Environment
+# ------------------------------------------------------------------------------
+venv/
 .venv/
+env/
+.env/
 __pycache__/
 *.pyc
-.vscode/
-
-# --- C++ Build Artifacts ---
+*.pyo
+*.pyd
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+*.egg-info/
+.eggs/
+dist/
 build/
+*.egg
+
+# ------------------------------------------------------------------------------
+# C++ Build Artifacts
+# ------------------------------------------------------------------------------
+build/
+cmake-build-*/
 *.o
 *.out
 *.app
+*.dSYM/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
 
-# --- Data Handling ---
+# ------------------------------------------------------------------------------
+# Data Files (Large Datasets - Regenerate via scripts)
+# ------------------------------------------------------------------------------
 data/**/*.csv
 !data/train/.gitkeep
 !data/test/.gitkeep
+data/medmnist/
 
-# --- Results Handling ---
-results/**/*.csv
-results/*.csv
+# ------------------------------------------------------------------------------
+# Results (Regenerate via benchmark scripts)
+# Keep only summary CSVs, exclude intermediate files
+# ------------------------------------------------------------------------------
+results/*_clean_points.csv
+results/triangles.csv
+results/boundaries.csv
+results/predictions.csv
 results/logs/
 results/figures/
+
+# ------------------------------------------------------------------------------
+# Private/Unpublished
+# ------------------------------------------------------------------------------
+papers/
+drafts/
+*.draft.md
+
+# ------------------------------------------------------------------------------
+# Large Binary Files
+# ------------------------------------------------------------------------------
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.pdf
+*.zip
+*.tar.gz
+
+# EXCEPTION: Keep key figures for README
+!figures/wine/4_decision_boundary.png
+!figures/earthquake/4_decision_boundary.png
+!figures/spiral/4_decision_boundary.png
+!figures/summary_scalability.png
+!figures/summary_dynamic_updates.png
+
+# ------------------------------------------------------------------------------
+# Temporary Files
+# ------------------------------------------------------------------------------
+*.tmp
+*.temp
+*.log
+*.bak
