@@ -5,7 +5,7 @@
 [![Python](https://img.shields.io/badge/Python-3.8+-green.svg)](https://python.org/)
 [![CGAL](https://img.shields.io/badge/CGAL-5.x-orange.svg)](https://www.cgal.org/)
 
-A novel spatial classification algorithm using Delaunay Triangulation with **O(1) inference** and **O(1) dynamic updates**. Designed for real-time geospatial applications, streaming data, and embedded systems.
+A novel spatial classification algorithm using Delaunay Triangulation with **O(1) expected inference** and **O(1) dynamic updates**. Designed for real-time geospatial applications, streaming data, and embedded systems.
 
 ---
 
@@ -29,7 +29,7 @@ A novel spatial classification algorithm using Delaunay Triangulation with **O(1
 
 | Feature | Description |
 |---------|-------------|
-| **O(1) Inference** | Constant-time point classification using SRR spatial indexing |
+| **O(1) Expected Inference** | Constant-time point classification using SRR spatial indexing |
 | **O(1) Dynamic Updates** | Insert/delete points without model rebuild |
 | **No Training Phase** | Instant deployment — just load data |
 | **Interpretable** | Decision regions are visible Voronoi-like cells |
@@ -41,53 +41,54 @@ A novel spatial classification algorithm using Delaunay Triangulation with **O(1
 
 ### Accuracy (10-Fold Cross-Validation)
 
+Results from `scripts/benchmark_cv.py` with 10-fold stratified CV:
+
 | Dataset | Delaunay | KNN | SVM | Decision Tree | Random Forest |
 |---------|----------|-----|-----|---------------|---------------|
-| Wine | 93.81% | 95.50% | 97.76% | 92.12% | 98.31% |
-| Cancer | 92.10% | 93.32% | 94.73% | 92.44% | 94.73% |
-| Iris | 96.67% | 96.67% | 95.33% | 96.00% | 95.33% |
-| **Moons** | **100.00%** | 99.80% | 99.80% | 99.50% | 99.50% |
-| **Circles** | **100.00%** | 100.00% | 100.00% | 99.40% | 99.60% |
-| Spiral | 98.10% | 98.30% | 66.90% | 84.40% | 97.30% |
-| Earthquake | 94.18% | 94.76% | 93.02% | 93.68% | 94.10% |
+| Wine | 93.81 ± 3.63% | 95.50 ± 2.70% | 97.76 ± 2.10% | 92.12 ± 3.81% | 98.31 ± 2.22% |
+| Moons | **100.00 ± 0.00%** | 99.80 ± 0.42% | 99.80 ± 0.42% | 99.50 ± 0.97% | 99.50 ± 0.53% |
+| Spiral | 98.10 ± 1.45% | 98.30 ± 0.95% | 66.90 ± 3.51% | 84.40 ± 3.81% | 97.30 ± 1.34% |
+| Earthquake | 94.18 ± 0.84% | 94.76 ± 0.51% | 93.02 ± 0.67% | 93.68 ± 0.93% | 94.10 ± 0.81% |
 
 ### Inference Speed (C++ Benchmark)
 
-| Dataset | Delaunay (µs) | KNN (µs) | Speedup |
-|---------|---------------|----------|---------|
-| Wine | 0.10 | 3.62 | **36×** |
-| Moons | 0.10 | 3.62 | **36×** |
-| Spiral | 0.11 | 3.53 | **34×** |
-| Circles | 0.12 | 3.45 | **29×** |
-| Earthquake | 0.22 | 4.84 | **22×** |
+Results from `./build/benchmark` (values from `results/cpp_benchmark_*.csv`):
+
+| Dataset | Delaunay (µs) | FLANN KNN (µs) | Speedup |
+|---------|---------------|----------------|---------|
+| Wine | 0.108 | 2.983 | **27.7×** |
+| Moons | 0.140 | 3.747 | **26.7×** |
+| Spiral | 0.105 | 3.531 | **33.6×** |
+| Earthquake | 0.217 | 4.840 | **22.3×** |
 
 ### Dynamic Update Speed
 
-| Operation | Delaunay | Decision Tree | Speedup |
-|-----------|----------|---------------|---------|
-| Insert (1 point) | 1.1 µs | 7,954 µs | **6,893×** |
-| Delete (1 point) | 4.6 µs | 7,954 µs | **1,728×** |
+Results from `./build/benchmark` dynamic mode (from `results/cpp_benchmark_earthquake.csv`):
+
+| Operation | Delaunay | Decision Tree (Rebuild) | Speedup |
+|-----------|----------|-------------------------|---------|
+| Insert (1 point) | ~1,154 ns | ~7,954,850 ns | **~6,893×** |
 
 ---
 
 ## Algorithm Overview
 
-### Phase 1: Outlier Removal
-Removes noisy points using k-NN same-class density filtering.
+### Phase 1: Outlier Removal (k-NN Density Filter)
+Removes noisy points using k-NN same-class density filtering. Points with fewer than half neighbors of same class are marked as outliers.
 
 ### Phase 2: Delaunay Triangulation Construction
-Builds a mesh of non-overlapping triangles connecting all training points. Complexity: O(n log n).
+Builds a mesh of non-overlapping triangles connecting all training points using CGAL. **Complexity: O(n log n)**
 
 ### Phase 3: SRR Grid Construction
-Creates a √n × √n spatial index for O(1) point location instead of O(√n) walking.
+Creates a √n × √n spatial index (Square Root Rule) for O(1) expected point location instead of O(√n) walking.
 
-### Phase 4: Classification
+### Phase 4: Classification (Inference)
 For a query point:
-1. Hash to SRR bucket → get triangle hint (O(1))
-2. Walk to containing triangle (O(1) expected)
-3. Majority vote among 3 vertices (O(1))
+1. Hash (x,y) to SRR bucket → get triangle hint **O(1)**
+2. Walk from hint to containing triangle **O(1) expected**
+3. Majority vote among 3 triangle vertices **O(1)**
 
-**Total inference complexity: O(1)**
+**Total inference complexity: O(1) expected**
 
 ---
 
@@ -95,28 +96,44 @@ For a query point:
 
 ```
 Delaunay-Triangulation-Classification/
-├── src/                          # C++ source files
-│   ├── DelaunayClassifier.cpp    # Core classifier implementation
-│   ├── main.cpp                  # Demo application
-│   ├── benchmark.cpp             # Static/dynamic benchmarks
-│   └── ablation_bench.cpp        # Ablation study
+├── src/                              # C++ source files
+│   ├── DelaunayClassifier.cpp        # Core classifier with SRR grid
+│   ├── main.cpp                      # CLI application (static/dynamic modes)
+│   ├── benchmark.cpp                 # C++ benchmark (FLANN KNN, LibSVM, DT)
+│   └── ablation_bench.cpp            # C++ ablation study
+│
 ├── include/
-│   └── DelaunayClassifier.h      # Header file
-├── scripts/                      # Python scripts
-│   ├── benchmark_cv.py           # 10-fold cross-validation
-│   ├── generate_figures.py       # Publication figure generator
-│   ├── generate_spatial_datasets.py  # Dataset generators
-│   ├── scalability_test.py       # Scalability analysis
-│   └── visualizer.py             # Visualization utilities
+│   └── DelaunayClassifier.h          # Header with public API
+│
+├── scripts/                          # Python scripts
+│   ├── data_generator.py             # Generates: wine, cancer, iris, digits, moons, blobs
+│   ├── generate_spatial_datasets.py  # Generates: spiral, circles, checkerboard, earthquake, bloodmnist
+│   ├── benchmark.py                  # Python static/dynamic benchmark wrapper
+│   ├── benchmark_cv.py               # 10-fold cross-validation with significance tests
+│   ├── ablation_study.py             # Python ablation study wrapper
+│   ├── scalability_test.py           # Scalability analysis (O(n log n) training, O(1) inference)
+│   ├── generate_figures.py           # Publication figure generator (69 figures)
+│   └── visualizer.py                 # Visualization utilities
+│
 ├── data/
-│   ├── train/                    # Training datasets (CSV)
-│   └── test/                     # Test datasets (CSV)
-├── results/                      # Benchmark outputs
-│   ├── cv_summary.csv            # Cross-validation results
-│   ├── significance_tests.csv   # Statistical significance
-│   └── cpp_benchmark_*.csv       # C++ timing results
-├── figures/                      # Generated figures
-└── CMakeLists.txt                # CMake build configuration
+│   ├── train/                        # Training datasets (CSV: x, y, label)
+│   │   ├── {dataset}_train.csv       # Main training data
+│   │   ├── {dataset}_dynamic_base.csv  # Base data for dynamic benchmarks
+│   │   └── {dataset}_dynamic_stream.csv # Stream data for dynamic benchmarks
+│   └── test/
+│       ├── {dataset}_test_X.csv      # Test features only
+│       └── {dataset}_test_y.csv      # Test features + labels
+│
+├── results/                          # Benchmark outputs
+│   ├── cv_summary.csv                # 10-fold CV accuracy ± std
+│   ├── significance_tests.csv        # t-test and Wilcoxon p-values
+│   ├── cpp_benchmark_{dataset}.csv   # C++ timing per dataset
+│   └── logs/                         # Dynamic benchmark logs
+│
+├── figures/                          # Generated publication figures
+│   └── {dataset}/                    # 6 figures per dataset
+│
+└── CMakeLists.txt                    # CMake build configuration
 ```
 
 ---
@@ -129,16 +146,16 @@ Delaunay-Triangulation-Classification/
 |------------|---------|---------|
 | CMake | ≥ 3.10 | Build system |
 | CGAL | ≥ 5.0 | Delaunay triangulation |
-| FLANN | ≥ 1.9 | KNN baseline |
-| LibSVM | ≥ 3.25 | SVM baseline |
+| FLANN | ≥ 1.9 | KNN baseline (C++) |
+| LibSVM | ≥ 3.25 | SVM baseline (C++) |
+| LZ4 | Latest | FLANN compression |
 | Python | ≥ 3.8 | Scripts |
-| NumPy, SciPy, scikit-learn | Latest | Python benchmarks |
 
 ### macOS (Homebrew)
 
 ```bash
 # Install C++ dependencies
-brew install cmake cgal flann libsvm
+brew install cmake cgal flann libsvm lz4
 
 # Clone repository
 git clone https://github.com/yourusername/Delaunay-Triangulation-Classification.git
@@ -150,7 +167,7 @@ cmake .. -DCMAKE_BUILD_TYPE=Release
 make -j4
 cd ..
 
-# Setup Python
+# Setup Python environment
 python3 -m venv venv
 source venv/bin/activate
 pip install numpy scipy scikit-learn pandas matplotlib
@@ -159,61 +176,57 @@ pip install numpy scipy scikit-learn pandas matplotlib
 ### Ubuntu/Debian
 
 ```bash
-# Install C++ dependencies
 sudo apt-get update
-sudo apt-get install cmake libcgal-dev libflann-dev libsvm-dev
-
-# Build (same as macOS after clone)
+sudo apt-get install cmake libcgal-dev libflann-dev libsvm-dev liblz4-dev
 ```
 
 ---
 
 ## Quick Start
 
-### Generate Datasets
+### Step 1: Generate Standard Datasets (6 datasets)
 
 ```bash
 source venv/bin/activate
+
+# Generate: wine, cancer, iris, digits, moons, blobs
+for ds in wine cancer iris digits moons blobs; do
+  python scripts/data_generator.py --type $ds
+done
+```
+
+### Step 2: Generate Spatial Datasets (5 additional datasets)
+
+```bash
+# Generate: spiral, circles, checkerboard, earthquake, bloodmnist
 python scripts/generate_spatial_datasets.py
 ```
 
-This generates 11 datasets in `data/train/` and `data/test/`.
+**Total: 11 datasets** in `data/train/` and `data/test/`.
 
-### Run Demo
-
-```bash
-./build/app data/train/wine_train.csv data/test/wine_test.csv
-```
-
-### Run Benchmarks
+### Step 3: Run Demo
 
 ```bash
-# Python 10-fold CV (all datasets)
-python scripts/benchmark_cv.py --datasets wine,cancer,iris,moons,spiral,earthquake --folds 10
-
-# C++ benchmark (single dataset)
-./build/benchmark data/train/wine_train.csv data/test/wine_test_y.csv wine
-
-# C++ ablation study
-./build/ablation_bench data/train/wine_train.csv data/test/wine_test_y.csv
+./build/main static data/train/wine_train.csv data/test/wine_test_X.csv results/
 ```
 
 ---
 
 ## Datasets
 
-| Dataset | Samples | Classes | Type | Source |
-|---------|---------|---------|------|--------|
-| Wine | 178 | 3 | UCI ML Repository | sklearn |
-| Cancer | 569 | 2 | UCI ML Repository | sklearn |
-| Iris | 150 | 3 | UCI ML Repository | sklearn |
-| Digits | 1,797 | 10 | UCI ML Repository | sklearn |
-| Moons | 1,000 | 2 | Synthetic | sklearn |
-| Blobs | 1,500 | 3 | Synthetic | sklearn |
-| Spiral | 1,000 | 2 | Synthetic | Custom |
-| Circles | 1,000 | 2 | Synthetic | Custom |
-| Checkerboard | 1,000 | 2 | Synthetic | Custom |
-| Earthquake | 5,000 | 4 | Real-world | USGS API |
+| Dataset | Samples | Classes | Type | Generator Script |
+|---------|---------|---------|------|------------------|
+| Wine | 178 | 3 | UCI ML | `data_generator.py --type wine` |
+| Cancer | 569 | 2 | UCI ML | `data_generator.py --type cancer` |
+| Iris | 150 | 3 | UCI ML | `data_generator.py --type iris` |
+| Digits | 1,797 | 10 | UCI ML | `data_generator.py --type digits` |
+| Moons | 1,000 | 2 | Synthetic | `data_generator.py --type moons` |
+| Blobs | 1,500 | 3 | Synthetic | `data_generator.py --type blobs` |
+| Spiral | 1,000 | 2 | Synthetic | `generate_spatial_datasets.py` |
+| Circles | 1,000 | 2 | Synthetic | `generate_spatial_datasets.py` |
+| Checkerboard | 1,000 | 4 | Synthetic | `generate_spatial_datasets.py` |
+| Earthquake | ~5,000 | 4 | USGS API | `generate_spatial_datasets.py` |
+| BloodMNIST | ~17,000 | 8 | MedMNIST | `generate_spatial_datasets.py` |
 
 ---
 
@@ -221,75 +234,84 @@ python scripts/benchmark_cv.py --datasets wine,cancer,iris,moons,spiral,earthqua
 
 ### 1. Cross-Validation Benchmark (Python)
 
-**Purpose:** Accuracy comparison with statistical significance tests.
+10-fold stratified CV with statistical significance tests:
 
 ```bash
 python scripts/benchmark_cv.py --datasets wine,moons,spiral,earthquake --folds 10
 ```
 
-**Output:**
-- `results/cv_summary.csv` — Mean ± std accuracy for all algorithms
+**Outputs:**
+- `results/cv_summary.csv` — Accuracy mean ± std for all algorithms
 - `results/significance_tests.csv` — Paired t-test and Wilcoxon p-values
 
-### 2. Static Benchmark (C++)
+### 2. C++ Static Benchmark
 
-**Purpose:** Pure inference timing comparison.
+Pure inference timing with FLANN KNN, LibSVM, Decision Tree:
 
 ```bash
 ./build/benchmark data/train/wine_train.csv data/test/wine_test_y.csv wine
 ```
 
-**Output:**
-- `results/cpp_benchmark_wine.csv` — Accuracy and timing for FLANN KNN, LibSVM, Decision Tree, Delaunay
+**Output:** `results/cpp_benchmark_wine.csv`
 
-### 3. Dynamic Benchmark (C++)
+### 3. C++ Dynamic Benchmark
 
-Included in the static benchmark. Measures insert/delete time vs. Decision Tree rebuild.
+Measures insert/delete time (included in static benchmark):
 
-### 4. Ablation Study (C++)
+```bash
+./build/benchmark data/train/earthquake_train.csv data/test/earthquake_test_y.csv earthquake
+```
 
-**Purpose:** Quantify contribution of SRR grid and decision boundary interpolation.
+### 4. C++ Ablation Study
+
+Quantify SRR grid and decision boundary contributions:
 
 ```bash
 ./build/ablation_bench data/train/wine_train.csv data/test/wine_test_y.csv
 ```
 
-**Output:** Speedup comparison: Full System vs. No SRR vs. Nearest Vertex Only.
+### 5. Python Benchmark (Static/Dynamic)
 
-### 5. Generate Figures
+```bash
+python scripts/benchmark.py --dataset wine --mode static
+python scripts/benchmark.py --dataset wine --mode dynamic
+```
+
+### 6. Generate Publication Figures
 
 ```bash
 python scripts/generate_figures.py
 ```
 
-**Output:** 69 publication-ready figures in `figures/` (300 DPI PNG).
+**Output:** 69 figures in `figures/` (6 per dataset + 3 summary).
 
 ---
 
 ## Reproducing Results
 
-To reproduce all benchmark results from the paper:
-
 ```bash
-# Step 1: Generate datasets
+# 1. Generate all datasets
+for ds in wine cancer iris digits moons blobs; do
+  python scripts/data_generator.py --type $ds
+done
 python scripts/generate_spatial_datasets.py
 
-# Step 2: Run Python 10-fold CV on all datasets
+# 2. Run 10-fold CV
 python scripts/benchmark_cv.py \
   --datasets wine,cancer,iris,digits,moons,blobs,spiral,circles,checkerboard,earthquake \
   --folds 10
 
-# Step 3: Run C++ benchmarks on each dataset
+# 3. Run C++ benchmarks
 for ds in wine cancer iris moons blobs spiral circles checkerboard earthquake; do
   ./build/benchmark data/train/${ds}_train.csv data/test/${ds}_test_y.csv $ds
 done
 
-# Step 4: Run ablation study
+# 4. Run ablation study
 for ds in wine moons spiral earthquake; do
   ./build/ablation_bench data/train/${ds}_train.csv data/test/${ds}_test_y.csv
 done
 
-# Step 5: Generate publication figures
+# 5. Generate figures
 python scripts/generate_figures.py
 ```
 
@@ -304,48 +326,29 @@ python scripts/generate_figures.py
 ```cpp
 #include "DelaunayClassifier.h"
 
-// Initialize classifier
+// Initialize and train
 DelaunayClassifier clf;
-
-// Train from CSV file
 clf.train("data/train/wine_train.csv");
 
-// Classify single point (O(1))
+// Static inference (O(1) expected)
 int label = clf.classify_single(0.5, 1.2);
 
-// Dynamic insert (O(1))
+// Dynamic insert (O(1) amortized)
 clf.insert_point(0.3, 0.8, 2);  // (x, y, label)
 
-// Dynamic delete (O(1))
+// Dynamic delete (O(1) amortized)
 clf.remove_point(0.3, 0.8);
 ```
 
-### Python API (via subprocess)
+### Python Benchmark API
 
 ```python
-import subprocess
+# Run static benchmark
+python scripts/benchmark.py --dataset wine --mode static
 
-# Run classifier
-result = subprocess.run([
-    './build/app',
-    'data/train/wine_train.csv',
-    'data/test/wine_test.csv'
-], capture_output=True, text=True)
-
-print(result.stdout)  # Accuracy, timing
+# Run 10-fold CV
+python scripts/benchmark_cv.py --datasets wine,moons --folds 10
 ```
-
----
-
-## Complexity Analysis
-
-| Operation | Complexity | Notes |
-|-----------|------------|-------|
-| Training | O(n log n) | Delaunay construction |
-| Inference | **O(1)** | With SRR grid |
-| Insert | **O(1)** amortized | Local re-triangulation |
-| Delete | **O(1)** amortized | Local re-triangulation |
-| Space | O(n) | Stores n points + triangulation |
 
 ---
 
@@ -363,8 +366,6 @@ Key results where Delaunay significantly outperforms baselines (p < 0.05):
 
 ## Citation
 
-If you use this code in your research, please cite:
-
 ```bibtex
 @article{delaunay_classifier_2026,
   title={Real-Time Spatial Classification via Delaunay Triangulation with O(1) Point Location},
@@ -378,7 +379,7 @@ If you use this code in your research, please cite:
 
 ## License
 
-This project is licensed under the MIT License — see [LICENSE](LICENSE) for details.
+MIT License — see [LICENSE](LICENSE) for details.
 
 ---
 
@@ -386,4 +387,4 @@ This project is licensed under the MIT License — see [LICENSE](LICENSE) for de
 
 - [CGAL](https://www.cgal.org/) — Computational Geometry Algorithms Library
 - [FLANN](https://github.com/flann-lib/flann) — Fast Library for Approximate Nearest Neighbors
-- [USGS Earthquake Hazards Program](https://earthquake.usgs.gov/) — Earthquake data
+- [USGS Earthquake Hazards Program](https://earthquake.usgs.gov/) — Real earthquake data
