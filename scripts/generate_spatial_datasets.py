@@ -279,7 +279,7 @@ def generate_bloodmnist(root):
 # SAVE DATASETS
 # ============================================
 def save_dataset(X, y, name, root, test_size=0.2):
-    """Save dataset to train/test CSV files."""
+    """Save dataset to train/test CSV files + dynamic base/stream files."""
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=test_size, random_state=RANDOM_SEED, stratify=y
     )
@@ -307,10 +307,45 @@ def save_dataset(X, y, name, root, test_size=0.2):
     })
     test_X_df.to_csv(f"{root}/data/test/{name}_test_X.csv", index=False, header=False)
     
-    print(f"   Saved: {name}_train.csv ({len(X_train)}), {name}_test_y.csv ({len(X_test)})")
+    # ===========================================
+    # DYNAMIC FILES (for incremental update demo)
+    # ===========================================
+    # Split training data: ~60% base, ~40% stream
+    if len(X_train) < 200:
+        base_size = min(100, int(len(X_train) * 0.7))
+    else:
+        base_size = int(len(X_train) * 0.6)
+    
+    if base_size < len(X_train):
+        # Shuffle to ensure class balance in both splits
+        indices = np.arange(len(X_train))
+        np.random.seed(RANDOM_SEED)
+        np.random.shuffle(indices)
+        
+        base_indices = indices[:base_size]
+        stream_indices = indices[base_size:]
+        
+        # Save dynamic base
+        base_df = pd.DataFrame({
+            'x': X_train[base_indices, 0],
+            'y': X_train[base_indices, 1],
+            'label': y_train[base_indices]
+        })
+        base_df.to_csv(f"{root}/data/train/{name}_dynamic_base.csv", index=False, header=False)
+        
+        # Save dynamic stream
+        stream_df = pd.DataFrame({
+            'x': X_train[stream_indices, 0],
+            'y': X_train[stream_indices, 1],
+            'label': y_train[stream_indices]
+        })
+        stream_df.to_csv(f"{root}/data/train/{name}_dynamic_stream.csv", index=False, header=False)
+        
+        print(f"   Saved: {name}_train.csv ({len(X_train)}), {name}_test_y.csv ({len(X_test)})")
+        print(f"   Saved: {name}_dynamic_base.csv ({base_size}), {name}_dynamic_stream.csv ({len(X_train) - base_size})")
 
 def save_bloodmnist(X_train, y_train, X_test, y_test, root):
-    """Save BloodMNIST with pre-split data."""
+    """Save BloodMNIST with pre-split data + dynamic files."""
     name = "bloodmnist"
     
     # Save train
@@ -336,7 +371,36 @@ def save_bloodmnist(X_train, y_train, X_test, y_test, root):
     })
     test_X_df.to_csv(f"{root}/data/test/{name}_test_X.csv", index=False, header=False)
     
+    # ===========================================
+    # DYNAMIC FILES (for incremental update demo)
+    # ===========================================
+    base_size = int(len(X_train) * 0.6)  # 60% base, 40% stream
+    
+    indices = np.arange(len(X_train))
+    np.random.seed(RANDOM_SEED)
+    np.random.shuffle(indices)
+    
+    base_indices = indices[:base_size]
+    stream_indices = indices[base_size:]
+    
+    # Save dynamic base
+    base_df = pd.DataFrame({
+        'x': X_train[base_indices, 0],
+        'y': X_train[base_indices, 1],
+        'label': y_train[base_indices]
+    })
+    base_df.to_csv(f"{root}/data/train/{name}_dynamic_base.csv", index=False, header=False)
+    
+    # Save dynamic stream
+    stream_df = pd.DataFrame({
+        'x': X_train[stream_indices, 0],
+        'y': X_train[stream_indices, 1],
+        'label': y_train[stream_indices]
+    })
+    stream_df.to_csv(f"{root}/data/train/{name}_dynamic_stream.csv", index=False, header=False)
+    
     print(f"   Saved: {name}_train.csv ({len(X_train)}), {name}_test_y.csv ({len(X_test)})")
+    print(f"   Saved: {name}_dynamic_base.csv ({base_size}), {name}_dynamic_stream.csv ({len(X_train) - base_size})")
 
 # ============================================
 # MAIN
