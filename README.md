@@ -19,10 +19,11 @@ A novel spatial classification algorithm using Delaunay Triangulation with **O(1
 6. [Quick Start Guide](#quick-start-guide)
 7. [Dataset Generation](#dataset-generation)
 8. [Benchmark Procedures](#benchmark-procedures)
-9. [Reproducing Results](#reproducing-results)
-10. [Benchmark Results](#benchmark-results)
-11. [API Reference](#api-reference)
-12. [Citation](#citation)
+9. [Unit Testing](#unit-testing)
+10. [Reproducing Results](#reproducing-results)
+11. [Benchmark Results](#benchmark-results)
+12. [API Reference](#api-reference)
+13. [Citation](#citation)
 
 ---
 
@@ -115,6 +116,38 @@ sudo apt-get install cmake libcgal-dev libflann-dev libsvm-dev liblz4-dev
 # Then follow steps 2-5 above
 ```
 
+### Windows (vcpkg)
+
+```powershell
+# Step 1: Install vcpkg (if not already installed)
+git clone https://github.com/microsoft/vcpkg.git
+cd vcpkg
+.\bootstrap-vcpkg.bat
+.\vcpkg integrate install
+
+# Step 2: Install C++ dependencies
+.\vcpkg install cgal:x64-windows flann:x64-windows libsvm:x64-windows lz4:x64-windows
+
+# Step 3: Clone and build
+cd ..
+git clone https://github.com/yourusername/Delaunay-Triangulation-Classification.git
+cd Delaunay-Triangulation-Classification
+mkdir build && cd build
+cmake .. -DCMAKE_TOOLCHAIN_FILE=[vcpkg-root]/scripts/buildsystems/vcpkg.cmake -DCMAKE_BUILD_TYPE=Release
+cmake --build . --config Release
+cd ..
+
+# Step 4: Setup Python environment
+python -m venv venv
+.\venv\Scripts\activate
+pip install numpy scipy scikit-learn pandas matplotlib
+
+# Step 5: Verify installation
+.\build\Release\main.exe static data\train\wine_train.csv data\test\wine_test_X.csv results\
+```
+
+> **Note:** Replace `[vcpkg-root]` with your actual vcpkg installation path (e.g., `C:\vcpkg`).
+
 ---
 
 ## Project Structure
@@ -139,7 +172,10 @@ Delaunay-Triangulation-Classification/
 │   ├── scalability_test.py             # Scalability analysis O(n log n) training
 │   ├── generate_publication_figures.py # Publication figures (9 per dataset, 81 total)
 │   ├── generate_figures.py             # Additional benchmark figures
-│   └── visualizer.py                   # Visualization utilities
+│   └── visualizer.py                   # Legacy CLI visualization utility
+│
+├── tests/                              # Unit tests
+│   └── test_classifier.py              # Comprehensive test suite (12 tests)
 │
 ├── data/
 │   ├── train/                          # Training datasets
@@ -370,6 +406,100 @@ No SRR Grid (O(sqrt(n)))            | 100.00%     |       0.1771    | 1.68x
 Nearest Vertex Only                 | 100.00%     |       0.5254    | 4.99x
 ================================================================================
 ```
+
+---
+
+### Benchmark 5: Scalability Test
+
+**Purpose:** Validate O(n log n) training and O(1) inference complexity claims.
+
+**Script:** `scripts/scalability_test.py`
+
+```bash
+python scripts/scalability_test.py
+```
+
+**What it does:**
+- Generates synthetic datasets with n = {100, 1K, 10K, 100K} points
+- Measures training time (builds DT) → should follow O(n log n)
+- Measures inference time (fixed 100 test points) → should be O(1) constant
+- Generates log-log plots for visual verification
+
+**Outputs:**
+- `results/scalability_train.csv` — Training time at each n
+- `results/scalability_inference.csv` — Inference time at each n
+- `results/scalability_plots.png` — Log-log visualization
+
+**Expected results:**
+| n | Training Time | Inference Time |
+|---|---------------|----------------|
+| 100 | ~5 ms | ~0.1 µs |
+| 1,000 | ~50 ms | ~0.1 µs |
+| 10,000 | ~500 ms | ~0.1 µs |
+| 100,000 | ~6 sec | ~0.1 µs |
+
+> **Key insight:** Inference time remains **constant** regardless of training set size, validating the O(1) claim.
+
+---
+
+## Unit Testing
+
+Comprehensive test suite for validating algorithm correctness.
+
+### Running Tests
+
+```bash
+# Run all tests
+source venv/bin/activate
+python tests/test_classifier.py
+
+# Or with pytest (more detailed output)
+pip install pytest
+pytest tests/test_classifier.py -v
+```
+
+### Test Categories
+
+| Category | Tests | Description |
+|----------|-------|-------------|
+| `TestDataLoading` | 2 | CSV format, label validation |
+| `TestDelaunayTriangulation` | 2 | Circumcircle property, basic construction |
+| `TestCppClassifier` | 2 | Static mode, accuracy on separable data |
+| `TestOutlierDetection` | 1 | Isolated point detection |
+| `TestSRRGrid` | 2 | Grid size formula, O(1) lookup |
+| `TestDynamicOperations` | 1 | Insert preserves Delaunay |
+| `TestClassificationVoting` | 1 | Majority vote correctness |
+| `TestDatasetGeneration` | 1 | Output file format |
+
+**Total: 12 tests**
+
+### Sample Output
+
+```
+======================================================================
+DELAUNAY CLASSIFIER UNIT TESTS
+======================================================================
+test_csv_format ... ok
+test_label_values ... ok
+test_delaunay_circumcircle_property ... ok
+test_scipy_delaunay_basic ... ok
+test_cpp_accuracy ... ok
+test_cpp_static_mode ... ok
+test_outlier_isolation ... ok
+test_grid_lookup_O1 ... ok
+test_grid_size_formula ... ok
+test_insert_preserves_delaunay ... ok
+test_majority_vote ... ok
+test_data_generator_output_format ... ok
+----------------------------------------------------------------------
+Ran 12 tests in 1.939s
+
+OK
+✓ ALL TESTS PASSED
+======================================================================
+```
+
+> **Why Unit Tests Matter for Publication:** SCI-indexed journals increasingly require evidence of reproducibility. Unit tests demonstrate that your implementation is correct and verifiable by reviewers.
 
 ---
 
