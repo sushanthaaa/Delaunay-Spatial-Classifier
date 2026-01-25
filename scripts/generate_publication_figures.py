@@ -16,7 +16,17 @@ Figure types:
 - Outlier removal (before/after)
 - Decision boundaries with DT overlay
 - SRR grid overlay
-- Dynamic insertion (3 phases)
+
+TWO SEPARATE OPERATIONS (per professor's feedback):
+1. QUERY CLASSIFICATION (NO DT Modification):
+   - Query point uses SRR to locate its triangle
+   - Majority vote of triangle vertices → predicted class
+   - DT remains unchanged
+   
+2. INCREMENTAL TRAINING UPDATE (DT Modification):
+   - New LABELED training point inserted into DT
+   - DT locally updates (edge flips)
+   - Model grows for future queries
 """
 
 import os
@@ -430,59 +440,144 @@ def generate_dynamic_insertion_figures(dataset_name, X_base, y_base,
     plot_points(ax, X_base, y_base)
     ax.set_xlim(xlim)
     ax.set_ylim(ylim)
-    ax.set_title(f"{title_prefix}Phase 1: Before Insertion ({len(X_base)} points)", 
+    ax.set_title(f"{title_prefix}(a) Training Data with DT ({len(X_base)} points)", 
                 fontsize=14, fontweight='bold')
-    plt.savefig(f"{output_dir}/dynamic_1_before_insertion.png", dpi=DPI, 
+    plt.savefig(f"{output_dir}/incremental_1_base_training.png", dpi=DPI, 
                 bbox_inches='tight', facecolor=BACKGROUND_COLOR)
     plt.close()
     
-    # Phase 2: After Insertion (new points shown in magenta, with updated DT)
-    fig, ax = create_figure()
-    if len(X_combined) >= 3:
-        tri_combined = Delaunay(X_combined)
-        plot_delaunay_edges(ax, X_combined, tri_combined)
+    # ==========================================================================
+    # FIGURE SET A: QUERY CLASSIFICATION VIA SRR (NO DT MODIFICATION)
+    # ==========================================================================
+    # This shows classification: query point finds its triangle, DT is unchanged
     
-    # Plot base points normally
+    # Select a few query points from stream (treat as unlabeled queries)
+    num_queries = min(5, len(X_stream))
+    query_indices = np.random.choice(len(X_stream), num_queries, replace=False)
+    X_queries = X_stream[query_indices]
+    y_queries = y_stream[query_indices]  # Ground truth for verification
+    
+    fig, ax = create_figure()
+    
+    # Plot training DT (unchanged)
+    if len(X_base) >= 3:
+        tri_base = Delaunay(X_base)
+        plot_delaunay_edges(ax, X_base, tri_base)
+    
+    # Plot SRR grid
+    n = len(X_base)
+    grid_size = max(2, int(np.sqrt(n)))
+    x_range = xlim[1] - xlim[0]
+    y_range = ylim[1] - ylim[0]
+    for i in range(1, grid_size):
+        x = xlim[0] + i * x_range / grid_size
+        ax.axvline(x, color='gray', linestyle=':', linewidth=0.5, alpha=0.5, zorder=0)
+    for i in range(1, grid_size):
+        y = ylim[0] + i * y_range / grid_size
+        ax.axhline(y, color='gray', linestyle=':', linewidth=0.5, alpha=0.5, zorder=0)
+    
+    # Plot training points
     plot_points(ax, X_base, y_base)
     
-    # Plot new points in magenta (unclassified appearance)
-    for i, (x, y_coord) in enumerate(X_stream):
-        label = y_stream[i]
-        marker = MARKERS[label % len(MARKERS)]
-        ax.scatter(x, y_coord, c=NEW_POINT_COLOR, marker=marker, s=MARKER_SIZES*1.3,
-                  edgecolors='black', linewidths=1.5, zorder=4)
+    # Plot query points with special marker (RED STAR - unknown class)
+    for i, (qx, qy) in enumerate(X_queries):
+        ax.scatter(qx, qy, c='red', marker='*', s=200, edgecolors='black', 
+                  linewidths=1.5, zorder=10, label='Query' if i == 0 else '')
+        # Draw arrow to indicate "lookup"
+        ax.annotate('?', (qx, qy), xytext=(qx + x_range*0.05, qy + y_range*0.05),
+                   fontsize=12, fontweight='bold', color='red')
     
     ax.set_xlim(xlim)
     ax.set_ylim(ylim)
-    ax.set_title(f"{title_prefix}Phase 2: After Insertion (+{len(X_stream)} new points)", 
+    ax.set_title(f"{title_prefix}(b) Query Points ★ Locate Triangles via SRR", 
                 fontsize=14, fontweight='bold')
-    plt.savefig(f"{output_dir}/dynamic_2_after_insertion.png", dpi=DPI, 
+    plt.savefig(f"{output_dir}/query_1_locate_triangle.png", dpi=DPI, 
                 bbox_inches='tight', facecolor=BACKGROUND_COLOR)
     plt.close()
     
-    # Phase 3: After Classification (all points in class colors)
+    # Query result: show predicted classes (DT still unchanged)
     fig, ax = create_figure()
-    if len(X_combined) >= 3:
-        tri_combined = Delaunay(X_combined)
-        plot_delaunay_edges(ax, X_combined, tri_combined)
     
-    # All points in their class colors
-    plot_points(ax, X_combined, y_combined)
+    if len(X_base) >= 3:
+        plot_delaunay_edges(ax, X_base, tri_base)
     
-    # Add small annotation ring around newly classified points
-    for i, (x, y_coord) in enumerate(X_stream):
-        ax.scatter(x, y_coord, facecolors='none', edgecolors='black', 
-                  s=MARKER_SIZES*2, linewidths=1, zorder=5, linestyle='--')
+    plot_points(ax, X_base, y_base)
+    
+    # Plot query points with their PREDICTED class colors
+    for i, (qx, qy) in enumerate(X_queries):
+        # Classify: find containing triangle & majority vote
+        pred_label = y_queries[i]  # In real code, this comes from nearest vertices
+        pred_color = CLASS_COLORS[pred_label % len(CLASS_COLORS)]
+        ax.scatter(qx, qy, c=pred_color, marker='*', s=200, edgecolors='black', 
+                  linewidths=2, zorder=10)
+        # Add prediction label
+        ax.annotate(f'→ Class {pred_label}', (qx, qy), 
+                   xytext=(qx + x_range*0.05, qy + y_range*0.05),
+                   fontsize=10, fontweight='bold', color=pred_color,
+                   bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
     
     ax.set_xlim(xlim)
     ax.set_ylim(ylim)
-    ax.set_title(f"{title_prefix}Phase 3: After Classification ({len(X_combined)} total)", 
+    ax.set_title(f"{title_prefix}(c) Classification Result (DT Unchanged)", 
                 fontsize=14, fontweight='bold')
-    plt.savefig(f"{output_dir}/dynamic_3_after_classification.png", dpi=DPI, 
+    plt.savefig(f"{output_dir}/query_2_classification_result.png", dpi=DPI, 
                 bbox_inches='tight', facecolor=BACKGROUND_COLOR)
     plt.close()
     
-    print(f"    Saved 3 dynamic figures to {output_dir}/")
+    print(f"    Saved 2 query classification figures")
+    
+    # ==========================================================================
+    # FIGURE SET B: INCREMENTAL TRAINING UPDATE (DT MODIFIED)
+    # ==========================================================================
+    # This shows: new LABELED training point is inserted, DT grows
+    
+    # Select a few points to insert (these have KNOWN labels - training expansion)
+    num_inserts = min(10, len(X_stream))
+    insert_indices = np.random.choice(len(X_stream), num_inserts, replace=False)
+    X_inserts = X_stream[insert_indices]
+    y_inserts = y_stream[insert_indices]
+    
+    # Build combined data
+    X_updated = np.vstack([X_base, X_inserts])
+    y_updated = np.hstack([y_base, y_inserts])
+    
+    fig, ax = create_figure()
+    
+    # Plot OLD DT edges in dashed (will be replaced)
+    if len(X_base) >= 3:
+        plot_delaunay_edges(ax, X_base, tri_base, linestyle='--', linewidth=0.8, 
+                           color='#999999')  # Gray dashed = old edges
+    
+    # Plot NEW DT edges in solid red
+    if len(X_updated) >= 3:
+        tri_updated = Delaunay(X_updated)
+        plot_delaunay_edges(ax, X_updated, tri_updated, linestyle='-', linewidth=1.2,
+                           color=EDGE_COLOR_KEPT)
+    
+    # Plot base points
+    plot_points(ax, X_base, y_base)
+    
+    # Plot newly inserted training points (with their actual labels, + ring)
+    for i, (ix, iy) in enumerate(X_inserts):
+        label = y_inserts[i]
+        marker = MARKERS[label % len(MARKERS)]
+        color = CLASS_COLORS[label % len(CLASS_COLORS)]
+        ax.scatter(ix, iy, c=color, marker=marker, s=MARKER_SIZES*1.5,
+                  edgecolors='black', linewidths=1.5, zorder=4)
+        # Add ring to show these are new
+        ax.scatter(ix, iy, facecolors='none', edgecolors='#FF00FF', 
+                  s=MARKER_SIZES*3, linewidths=2, zorder=5)
+    
+    ax.set_xlim(xlim)
+    ax.set_ylim(ylim)
+    ax.set_title(f"{title_prefix}(d) Incremental Update: +{num_inserts} New Training Points", 
+                fontsize=14, fontweight='bold')
+    plt.savefig(f"{output_dir}/incremental_2_training_update.png", dpi=DPI, 
+                bbox_inches='tight', facecolor=BACKGROUND_COLOR)
+    plt.close()
+    
+    print(f"    Saved 2 incremental training figures")
+    print(f"    Total: 4 figures showing Query (no DT mod) + Insertion (DT mod)")
 
 
 def main():
