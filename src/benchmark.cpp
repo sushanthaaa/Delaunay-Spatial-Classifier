@@ -1,3 +1,39 @@
+/**
+ * @file benchmark.cpp
+ * @brief Fair C++ Benchmark Suite for Delaunay Classifier vs. Baselines
+ *
+ * This file provides a FAIR algorithmic comparison by implementing ALL methods
+ * in C++ with -O3 optimization. This eliminates Python/C++ interop overhead
+ * that would skew timing comparisons.
+ *
+ * Baseline Implementations:
+ * 1. FLANN KNN (k=5): Modern KD-tree based approximate nearest neighbors
+ *    - Uses FLANN library for efficient indexing
+ *    - k=5 matches sklearn's default for fair comparison with CV results
+ *
+ * 2. LibSVM (RBF): Support Vector Machine with radial basis function kernel
+ *    - Uses official LibSVM C implementation
+ *    - Default γ=0.5, C=1.0 parameters
+ *
+ * 3. C++ Decision Tree: Custom axis-aligned split implementation
+ *    - Gini impurity criterion
+ *    - max_depth=15, min_samples=2 to prevent overfitting
+ *
+ * 4. Delaunay C++ (Ours): Our proposed classifier
+ *    - O(n log n) training via CGAL Delaunay construction
+ *    - O(1) inference via SRR grid optimization
+ *
+ * Benchmark Types:
+ * - STATIC: Measures training time and per-point inference time
+ * - DYNAMIC: Measures insert/move/delete times for incremental updates
+ *
+ * Usage: ./benchmark <train_csv> <test_csv> <dataset_name>
+ * Output: results/cpp_benchmark_<dataset_name>.csv
+ *
+ * @note All timing uses std::chrono::high_resolution_clock for precision.
+ * @note Results are averaged over all test points for statistical stability.
+ */
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -9,24 +45,45 @@
 #include <svm.h>
 #include <vector>
 
-// Include Delaunay classifier
+// Include our Delaunay classifier
 #include "../include/DelaunayClassifier.h"
 
+// =============================================================================
+// RESULT STRUCTURES
+// =============================================================================
+
+/**
+ * @struct BenchmarkResult
+ * @brief Stores results from static (inference) benchmarks.
+ */
 struct BenchmarkResult {
   std::string method;
   double accuracy;
-  double avg_inference_us;
-  double train_time_ms;
+  double avg_inference_us; // Microseconds per classification
+  double train_time_ms;    // Milliseconds for training
 };
 
+/**
+ * @struct DynamicResult
+ * @brief Stores results from dynamic (insert/move/delete) benchmarks.
+ */
 struct DynamicResult {
   std::string method;
-  double insert_ns;
-  double move_ns;
-  double delete_ns;
+  double insert_ns; // Nanoseconds per insert
+  double move_ns;   // Nanoseconds per move
+  double delete_ns; // Nanoseconds per delete
 };
 
-// Load labeled CSV: x,y,label
+// =============================================================================
+// DATA LOADING
+// =============================================================================
+
+/**
+ * @brief Load labeled CSV data (format: x,y,label).
+ *
+ * Uses float for compatibility with FLANN which expects float*.
+ * The label is stored as int for classification.
+ */
 std::vector<std::tuple<float, float, int>>
 load_labeled_csv(const std::string &filepath) {
   std::vector<std::tuple<float, float, int>> points;
