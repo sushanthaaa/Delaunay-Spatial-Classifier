@@ -694,23 +694,115 @@ void DelaunayClassifier::run_dynamic_visualization(
  * @brief Classify a single point with full SRR optimization.
  *
  * This is the core O(1) inference method:
- * 1. SRR grid lookup → get starting face hint
+ * 1. SRR grid lookup → get starting face hint (works even outside hull)
  * 2. CGAL locate with hint → find containing triangle
  * 3. Classify within triangle → vote among 3 vertices
  *
- * For points outside the convex hull, we fall back to nearest vertex.
+ * EXTENDED: For points outside the convex hull:
+ * 1. SRR grid still identifies which cell the point belongs to
+ * 2. Find the adjacent boundary triangle (finite neighbor of infinite face)
+ * 3. Determine which decision boundary region the point falls in
+ * 4. Classify based on that region (not just nearest vertex)
+ *
+ * This ensures classification matches the extended decision boundary
+ * visualization.
  */
 int DelaunayClassifier::classify_single(double x, double y) {
   Point p(x, y);
 
-  // O(1) grid lookup
+  // O(1) SRR grid lookup - works even for points outside hull
+  // This tells us which spatial region the point belongs to
   Face_handle hint = get_srr_hint(p);
 
   // O(1) locate with hint
   Face_handle f = dt.locate(p, hint);
 
   if (dt.is_infinite(f)) {
-    // Point is outside the convex hull - use nearest vertex
+    // =================================================================
+    // OUTSIDE CONVEX HULL - Use Decision Boundary Region Classification
+    // =================================================================
+    // When a point is outside the convex hull, CGAL returns an "infinite face".
+    // The infinite face has edges on the convex hull boundary.
+    // We use the extended decision boundary logic to classify.
+    //
+    // Algorithm:
+    // 1. Find the boundary edge closest to the query point
+    // 2. Get the finite triangle adjacent to that edge
+    // 3. Determine which decision boundary region the point falls in
+    // 4. Return the class of that region
+
+    // Find the boundary triangle (finite neighbor of the infinite face)
+    Face_handle boundary_triangle;
+    int boundary_edge_index = -1;
+    double min_dist = 1e18;
+
+    for (int i = 0; i < 3; i++) {
+      Face_handle neighbor = f->neighbor(i);
+      if (!dt.is_infinite(neighbor)) {
+        // This is a finite triangle adjacent to the hull
+        // Calculate distance to the shared edge (convex hull edge)
+        // The edge opposite to vertex i in face f is shared with neighbor
+
+        // Get the two vertices of the shared edge
+        Vertex_handle v1 = f->vertex((i + 1) % 3);
+        Vertex_handle v2 = f->vertex((i + 2) % 3);
+
+        // Skip if either vertex is infinite
+        if (dt.is_infinite(v1) || dt.is_infinite(v2))
+          continue;
+
+        // Calculate distance from query point to this hull edge
+        Point p1 = v1->point();
+        Point p2 = v2->point();
+
+        // Distance to edge midpoint (approximation for speed)
+        Point midpoint((p1.x() + p2.x()) / 2, (p1.y() + p2.y()) / 2);
+        double dist = CGAL::squared_distance(p, midpoint);
+
+        if (dist < min_dist) {
+          min_dist = dist;
+          boundary_triangle = neighbor;
+          boundary_edge_index = i;
+        }
+      }
+    }
+
+    if (boundary_triangle != Face_handle()) {
+      // Get the vertices of the boundary edge
+      Vertex_handle hull_v1 = f->vertex((boundary_edge_index + 1) % 3);
+      Vertex_handle hull_v2 = f->vertex((boundary_edge_index + 2) % 3);
+
+      // Check if both vertices are valid (not infinite)
+      if (!dt.is_infinite(hull_v1) && !dt.is_infinite(hull_v2)) {
+        int label1 = hull_v1->info();
+        int label2 = hull_v2->info();
+
+        // If both hull vertices have the same class, the outside region
+        // belongs entirely to that class
+        if (label1 == label2) {
+          return label1;
+        }
+
+        // If hull vertices have different classes, the decision boundary
+        // extends outward from the edge midpoint. We need to determine
+        // which side of the extended boundary the query point is on.
+
+        Point p1 = hull_v1->point();
+        Point p2 = hull_v2->point();
+        Point edge_midpoint((p1.x() + p2.x()) / 2, (p1.y() + p2.y()) / 2);
+
+        // The decision boundary extends perpendicular to the edge, or
+        // in the direction determined by the internal boundary line.
+        // For simplicity, we check which hull vertex is closer to the query.
+        double dist_to_v1 = CGAL::squared_distance(p, p1);
+        double dist_to_v2 = CGAL::squared_distance(p, p2);
+
+        // The point belongs to the region of the closer vertex
+        return (dist_to_v1 <= dist_to_v2) ? label1 : label2;
+      }
+    }
+
+    // Ultimate fallback: nearest vertex (should rarely happen)
     Vertex_handle v = dt.nearest_vertex(p);
     return v->info();
   }

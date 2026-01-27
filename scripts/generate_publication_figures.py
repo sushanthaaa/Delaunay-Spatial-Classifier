@@ -198,6 +198,175 @@ def plot_delaunay_edges_by_class(ax, X, y, tri,
         ax.add_collection(lc_cross)
 
 
+def plot_decision_boundaries(ax, X, y, tri, linewidth=2.5, color=DECISION_BOUNDARY_COLOR, 
+                              extend_to_axes=True, xlim=None, ylim=None):
+    """
+    Plot decision boundaries as black lines, extended to the plot edges.
+    
+    Decision boundary logic:
+    - For triangles with 2 classes: connect midpoints of cross-class edges
+    - For triangles with 3 classes: connect centroid to all edge midpoints
+    - For boundary edges: EXTEND the line to the plot axes
+    
+    This creates the "fence" that separates different class regions,
+    extending all the way to the plot borders like in the professor's example.
+    """
+    from scipy.spatial import ConvexHull
+    
+    boundary_lines = []
+    boundary_endpoints = []  # Track endpoints on convex hull for extension
+    
+    # Get convex hull edges (these are where we need to extend outward)
+    hull = ConvexHull(X)
+    hull_edges = set()
+    for i in range(len(hull.vertices)):
+        v1 = hull.vertices[i]
+        v2 = hull.vertices[(i + 1) % len(hull.vertices)]
+        hull_edges.add(tuple(sorted([v1, v2])))
+    
+    # Process each triangle
+    for simplex in tri.simplices:
+        v0, v1, v2 = simplex
+        l0, l1, l2 = y[v0], y[v1], y[v2]
+        p0, p1, p2 = X[v0], X[v1], X[v2]
+        
+        # Edge midpoints
+        m01 = (p0 + p1) / 2
+        m12 = (p1 + p2) / 2
+        m20 = (p2 + p0) / 2
+        
+        # Check which edges are on the convex hull
+        e01_on_hull = tuple(sorted([v0, v1])) in hull_edges
+        e12_on_hull = tuple(sorted([v1, v2])) in hull_edges
+        e20_on_hull = tuple(sorted([v2, v0])) in hull_edges
+        
+        # Case 1: All three vertices have DIFFERENT classes
+        if l0 != l1 and l1 != l2 and l0 != l2:
+            centroid = (p0 + p1 + p2) / 3
+            boundary_lines.append([centroid, m01])
+            boundary_lines.append([centroid, m12])
+            boundary_lines.append([centroid, m20])
+            
+            # Track hull midpoints for extension
+            if e01_on_hull:
+                boundary_endpoints.append((centroid, m01, p0, p1))
+            if e12_on_hull:
+                boundary_endpoints.append((centroid, m12, p1, p2))
+            if e20_on_hull:
+                boundary_endpoints.append((centroid, m20, p2, p0))
+        
+        # Case 2: Two classes in triangle
+        elif l0 != l1 or l1 != l2 or l0 != l2:
+            active_midpoints = []
+            active_edges_on_hull = []
+            
+            if l0 != l1:
+                active_midpoints.append(m01)
+                if e01_on_hull:
+                    active_edges_on_hull.append((m01, p0, p1))
+            if l1 != l2:
+                active_midpoints.append(m12)
+                if e12_on_hull:
+                    active_edges_on_hull.append((m12, p1, p2))
+            if l2 != l0:
+                active_midpoints.append(m20)
+                if e20_on_hull:
+                    active_edges_on_hull.append((m20, p2, p0))
+            
+            if len(active_midpoints) == 2:
+                boundary_lines.append([active_midpoints[0], active_midpoints[1]])
+                
+                # Track for extension if on hull
+                for midpoint, pa, pb in active_edges_on_hull:
+                    # The other midpoint is the "interior" point
+                    other = active_midpoints[1] if np.array_equal(midpoint, active_midpoints[0]) else active_midpoints[0]
+                    boundary_endpoints.append((other, midpoint, pa, pb))
+    
+    # Draw all internal boundary lines
+    if boundary_lines:
+        lc = LineCollection(boundary_lines, colors=color, linewidths=linewidth, 
+                           linestyles='-', zorder=2)
+        ax.add_collection(lc)
+    
+    # Extend boundaries to axes if requested
+    if extend_to_axes and boundary_endpoints:
+        if xlim is None:
+            xlim = ax.get_xlim()
+        if ylim is None:
+            ylim = ax.get_ylim()
+        
+        extension_lines = []
+        for interior_pt, hull_midpoint, hull_v1, hull_v2 in boundary_endpoints:
+            # Direction from interior point to hull midpoint
+            direction = hull_midpoint - interior_pt
+            if np.linalg.norm(direction) < 1e-10:
+                continue
+            direction = direction / np.linalg.norm(direction)
+            
+            # Extend outward from hull_midpoint
+            # Find intersection with plot boundary
+            extended_pt = extend_line_to_boundary(hull_midpoint, direction, xlim, ylim)
+            if extended_pt is not None:
+                extension_lines.append([hull_midpoint, extended_pt])
+        
+        if extension_lines:
+            lc_ext = LineCollection(extension_lines, colors=color, linewidths=linewidth, 
+                                   linestyles='-', zorder=2)
+            ax.add_collection(lc_ext)
+
+
+def extend_line_to_boundary(start_point, direction, xlim, ylim):
+    """
+    Extend a line from start_point in the given direction until it hits the plot boundary.
+    """
+    x0, y0 = start_point
+    dx, dy = direction
+    
+    if abs(dx) < 1e-10 and abs(dy) < 1e-10:
+        return None
+    
+    # Find intersection with each boundary
+    t_candidates = []
+    
+    # Left boundary (x = xlim[0])
+    if abs(dx) > 1e-10:
+        t = (xlim[0] - x0) / dx
+        if t > 0:
+            y_at_t = y0 + t * dy
+            if ylim[0] <= y_at_t <= ylim[1]:
+                t_candidates.append(t)
+    
+    # Right boundary (x = xlim[1])
+    if abs(dx) > 1e-10:
+        t = (xlim[1] - x0) / dx
+        if t > 0:
+            y_at_t = y0 + t * dy
+            if ylim[0] <= y_at_t <= ylim[1]:
+                t_candidates.append(t)
+    
+    # Bottom boundary (y = ylim[0])
+    if abs(dy) > 1e-10:
+        t = (ylim[0] - y0) / dy
+        if t > 0:
+            x_at_t = x0 + t * dx
+            if xlim[0] <= x_at_t <= xlim[1]:
+                t_candidates.append(t)
+    
+    # Top boundary (y = ylim[1])
+    if abs(dy) > 1e-10:
+        t = (ylim[1] - y0) / dy
+        if t > 0:
+            x_at_t = x0 + t * dx
+            if xlim[0] <= x_at_t <= xlim[1]:
+                t_candidates.append(t)
+    
+    if not t_candidates:
+        return None
+    
+    t_min = min(t_candidates)
+    return np.array([x0 + t_min * dx, y0 + t_min * dy])
+
+
 def plot_outlier_removal(ax, X_full, y_full, outlier_indices, tri_full, tri_clean):
     """Plot outlier removal with edge status (solid=kept, dashed=removed)."""
     
@@ -463,6 +632,10 @@ def generate_dynamic_insertion_figures(dataset_name, X_base, y_base,
     if len(X_base) >= 3:
         tri_base = Delaunay(X_base)
         plot_delaunay_edges(ax, X_base, tri_base)
+        
+        # Add decision boundary fence (black lines separating class regions)
+        # Extended to the plot axes
+        plot_decision_boundaries(ax, X_base, y_base, tri_base, xlim=xlim, ylim=ylim)
     
     # Plot SRR grid
     n = len(X_base)
@@ -489,7 +662,7 @@ def generate_dynamic_insertion_figures(dataset_name, X_base, y_base,
     
     ax.set_xlim(xlim)
     ax.set_ylim(ylim)
-    ax.set_title(f"{title_prefix}(b) Query Points ★ Locate Triangles via SRR", 
+    ax.set_title(f"{title_prefix}(b) Query Points ★ with Decision Boundaries", 
                 fontsize=14, fontweight='bold')
     plt.savefig(f"{output_dir}/query_1_locate_triangle.png", dpi=DPI, 
                 bbox_inches='tight', facecolor=BACKGROUND_COLOR)
@@ -632,12 +805,221 @@ def main():
             X_stream, y_stream, _, _ = load_data(stream_path)
             generate_dynamic_insertion_figures(ds_name, X_base, y_base, 
                                               X_stream, y_stream, output_dir)
+            
+            # Generate outside-hull classification figure
+            generate_outside_hull_figure(ds_name, X_base, y_base, 
+                                         X_stream, y_stream, output_dir)
     
     print("\n" + "=" * 70)
     print("FIGURE GENERATION COMPLETE!")
     print(f"Output directory: {figures_dir}")
     print("=" * 70)
 
+def generate_outside_hull_figure(dataset_name, X_base, y_base, X_stream, y_stream, output_dir):
+    """
+    Generate figures illustrating outside-hull classification with extended decision boundaries.
+    
+    Creates TWO figures:
+    1. Query point outside hull - shows how it's classified based on decision regions
+    2. After classification - shows the query connected to the mesh (if inserted)
+    
+    Fixed issues:
+    - No background shading
+    - Normal point sizes with correct markers
+    - Red DT edges (hull is part of DT, not separate black outline)
+    - Query placed in top-left SRR cell (S00 or S01)
+    """
+    from scipy.spatial import ConvexHull
+    
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Combine data for consistent plot limits
+    X_combined = np.vstack([X_base, X_stream])
+    
+    margin = 0.15
+    x_range = X_combined[:, 0].max() - X_combined[:, 0].min()
+    y_range = X_combined[:, 1].max() - X_combined[:, 1].min()
+    xlim = (X_combined[:, 0].min() - margin * x_range, X_combined[:, 0].max() + margin * x_range)
+    ylim = (X_combined[:, 1].min() - margin * y_range, X_combined[:, 1].max() + margin * y_range)
+    
+    if len(X_base) < 3:
+        return
+    
+    tri_base = Delaunay(X_base)
+    
+    # Calculate SRR grid parameters
+    n = len(X_base)
+    grid_size = max(2, int(np.sqrt(n)))
+    cell_width = (xlim[1] - xlim[0]) / grid_size
+    cell_height = (ylim[1] - ylim[0]) / grid_size
+    
+    # Place query point in top-left area (S00 or S01 cell) - OUTSIDE the hull
+    # S00 is at (row=grid_size-1, col=0), which is top-left
+    # We place it slightly inside the S00 cell but outside the convex hull
+    query_col = 0  # Leftmost column
+    query_row = grid_size - 1  # Top row
+    
+    # Center of S00 cell
+    query_x = xlim[0] + (query_col + 0.5) * cell_width
+    query_y = ylim[0] + (query_row + 0.5) * cell_height
+    
+    # Adjust to make sure it's outside the convex hull
+    hull = ConvexHull(X_base)
+    hull_centroid = X_base.mean(axis=0)
+    
+    # If query is inside hull, move it outward
+    query_outside = np.array([query_x, query_y])
+    
+    # Move toward top-left corner to ensure it's outside
+    direction_to_corner = np.array([xlim[0], ylim[1]]) - hull_centroid
+    direction_to_corner = direction_to_corner / np.linalg.norm(direction_to_corner)
+    
+    # Place query in top-left, definitely outside hull
+    query_outside = np.array([xlim[0] + 0.5 * cell_width, ylim[1] - 0.5 * cell_height])
+    
+    # ==========================================================================
+    # FIGURE 1: Query point outside hull, not yet classified
+    # ==========================================================================
+    fig, ax = create_figure()
+    
+    # Draw SRR grid with labels
+    for i in range(grid_size + 1):
+        x = xlim[0] + i * cell_width
+        ax.axvline(x, color='gray', linestyle=':', linewidth=0.8, alpha=0.6, zorder=0)
+    for i in range(grid_size + 1):
+        y = ylim[0] + i * cell_height
+        ax.axhline(y, color='gray', linestyle=':', linewidth=0.8, alpha=0.6, zorder=0)
+    
+    # Add SRR cell labels (S00, S01, etc.)
+    for row in range(grid_size):
+        for col in range(grid_size):
+            cell_center_x = xlim[0] + (col + 0.5) * cell_width
+            cell_center_y = ylim[0] + (row + 0.5) * cell_height
+            # Label only every few cells to avoid clutter
+            if grid_size <= 4 or (row % 2 == 0 and col % 2 == 0):
+                pass  # Skip labels for cleaner figure
+    
+    # Draw Delaunay triangulation edges (RED - including hull edges)
+    plot_delaunay_edges(ax, X_base, tri_base)
+    
+    # Draw decision boundaries (BLACK lines, extended to axes)
+    plot_decision_boundaries(ax, X_base, y_base, tri_base, xlim=xlim, ylim=ylim)
+    
+    # Draw training points (NORMAL size with correct markers)
+    plot_points(ax, X_base, y_base)
+    
+    # Draw query point OUTSIDE the hull (PURPLE STAR with ?)
+    ax.scatter([query_outside[0]], [query_outside[1]], 
+              c='red', marker='*', s=250, edgecolors='black', 
+              linewidths=1.5, zorder=10)
+    ax.annotate('?', (query_outside[0], query_outside[1]), 
+               xytext=(query_outside[0] + 0.03 * x_range, query_outside[1] + 0.03 * y_range),
+               fontsize=14, fontweight='bold', color='red', zorder=11)
+    
+    # Find nearest hull edge and draw connection line
+    min_dist = float('inf')
+    nearest_edge_midpoint = None
+    nearest_v1_idx = None
+    nearest_v2_idx = None
+    
+    for i in range(len(hull.vertices)):
+        v1_idx = hull.vertices[i]
+        v2_idx = hull.vertices[(i + 1) % len(hull.vertices)]
+        edge_midpoint = (X_base[v1_idx] + X_base[v2_idx]) / 2
+        dist = np.linalg.norm(query_outside - edge_midpoint)
+        if dist < min_dist:
+            min_dist = dist
+            nearest_edge_midpoint = edge_midpoint
+            nearest_v1_idx = v1_idx
+            nearest_v2_idx = v2_idx
+    
+    # Draw dashed line from query to nearest edge midpoint
+    if nearest_edge_midpoint is not None:
+        ax.plot([query_outside[0], nearest_edge_midpoint[0]], 
+               [query_outside[1], nearest_edge_midpoint[1]], 
+               'r--', linewidth=1.5, zorder=5)
+    
+    ax.set_xlim(xlim)
+    ax.set_ylim(ylim)
+    ax.set_title(f"(e) Query Point Outside Hull - Classification via Decision Region", 
+                fontsize=13, fontweight='bold')
+    
+    plt.savefig(f"{output_dir}/outside_hull_1_query.png", dpi=DPI, 
+                bbox_inches='tight', facecolor=BACKGROUND_COLOR)
+    plt.close()
+    
+    # ==========================================================================
+    # FIGURE 2: After classification - query gets classified and inserted into mesh
+    # ==========================================================================
+    fig, ax = create_figure()
+    
+    # Determine predicted class for the query point
+    # Based on decision boundary region logic
+    if nearest_v1_idx is not None and nearest_v2_idx is not None:
+        label1 = y_base[nearest_v1_idx]
+        label2 = y_base[nearest_v2_idx]
+        
+        if label1 == label2:
+            predicted_label = label1
+        else:
+            # Closer vertex determines class
+            dist1 = np.linalg.norm(query_outside - X_base[nearest_v1_idx])
+            dist2 = np.linalg.norm(query_outside - X_base[nearest_v2_idx])
+            predicted_label = label1 if dist1 <= dist2 else label2
+    else:
+        predicted_label = y_base[0]  # Fallback
+    
+    # Create new data with query point inserted
+    X_with_query = np.vstack([X_base, query_outside])
+    y_with_query = np.hstack([y_base, predicted_label])
+    
+    # Create new triangulation
+    tri_updated = Delaunay(X_with_query)
+    
+    # Draw SRR grid
+    for i in range(grid_size + 1):
+        x = xlim[0] + i * cell_width
+        ax.axvline(x, color='gray', linestyle=':', linewidth=0.8, alpha=0.6, zorder=0)
+    for i in range(grid_size + 1):
+        y = ylim[0] + i * cell_height
+        ax.axhline(y, color='gray', linestyle=':', linewidth=0.8, alpha=0.6, zorder=0)
+    
+    # Draw updated Delaunay triangulation (includes new edges to query point)
+    plot_delaunay_edges(ax, X_with_query, tri_updated)
+    
+    # Draw decision boundaries
+    plot_decision_boundaries(ax, X_with_query, y_with_query, tri_updated, xlim=xlim, ylim=ylim)
+    
+    # Draw original training points
+    plot_points(ax, X_base, y_base)
+    
+    # Draw the classified query point with its predicted class color
+    pred_color = CLASS_COLORS[predicted_label % len(CLASS_COLORS)]
+    pred_marker = MARKERS[predicted_label % len(MARKERS)]
+    ax.scatter([query_outside[0]], [query_outside[1]], 
+              c=pred_color, marker='*', s=300, edgecolors='black', 
+              linewidths=2, zorder=10)
+    
+    # Add label showing predicted class
+    ax.annotate(f'→ Class {predicted_label}', 
+               (query_outside[0], query_outside[1]), 
+               xytext=(query_outside[0] + 0.05 * x_range, query_outside[1] - 0.05 * y_range),
+               fontsize=11, fontweight='bold', color=pred_color,
+               bbox=dict(boxstyle='round', facecolor='white', alpha=0.8, edgecolor=pred_color),
+               zorder=11)
+    
+    ax.set_xlim(xlim)
+    ax.set_ylim(ylim)
+    ax.set_title(f"(f) After Classification - Query Connected to Mesh", 
+                fontsize=13, fontweight='bold')
+    
+    plt.savefig(f"{output_dir}/outside_hull_2_classified.png", dpi=DPI, 
+                bbox_inches='tight', facecolor=BACKGROUND_COLOR)
+    plt.close()
+    
+    print(f"    Saved 2 outside-hull classification figures")
+
 
 if __name__ == "__main__":
     main()
+
