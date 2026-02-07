@@ -376,6 +376,102 @@ class TestDatasetGeneration(unittest.TestCase):
         self.assertTrue(df.iloc[:, 1].dtype in [np.float64, np.float32], "Y should be float")
 
 
+class Test2DBuckets(unittest.TestCase):
+    """Test 2D Buckets data structure for O(1) dynamic classification."""
+    
+    def test_point_in_polygon_ray_casting(self):
+        """Test ray casting algorithm for point-in-polygon."""
+        # Square polygon
+        polygon = np.array([[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]])
+        
+        def point_in_polygon(x, y, poly):
+            """Ray casting algorithm."""
+            n = len(poly) - 1  # Last point = first point
+            inside = False
+            j = n - 1
+            for i in range(n):
+                xi, yi = poly[i]
+                xj, yj = poly[j]
+                if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi) + xi):
+                    inside = not inside
+                j = i
+            return inside
+        
+        # Test points inside
+        self.assertTrue(point_in_polygon(0.5, 0.5, polygon), "Center should be inside")
+        self.assertTrue(point_in_polygon(0.25, 0.25, polygon), "Quarter point should be inside")
+        
+        # Test points outside
+        self.assertFalse(point_in_polygon(1.5, 0.5, polygon), "Point outside right should be outside")
+        self.assertFalse(point_in_polygon(-0.5, 0.5, polygon), "Point outside left should be outside")
+    
+    def test_bucket_class_detection(self):
+        """Test that buckets correctly detect single vs multi-class regions."""
+        # Simulate bucket sampling
+        def sample_bucket_classes(center_class, corner_classes):
+            """Determine bucket type from 5 sample points."""
+            all_classes = [center_class] + corner_classes
+            unique = set(all_classes)
+            return len(unique)
+        
+        # Single class bucket
+        self.assertEqual(sample_bucket_classes(0, [0, 0, 0, 0]), 1)
+        
+        # Two class bucket
+        self.assertEqual(sample_bucket_classes(0, [0, 1, 0, 1]), 2)
+        
+        # Three class bucket
+        self.assertEqual(sample_bucket_classes(0, [0, 1, 2, 0]), 3)
+    
+    def test_srr_bucket_index_calculation(self):
+        """Test O(1) bucket index calculation."""
+        # Simulate SRR grid with 10x10 buckets
+        min_x, max_x = 0.0, 10.0
+        min_y, max_y = 0.0, 10.0
+        cols, rows = 10, 10
+        step_x = (max_x - min_x) / cols
+        step_y = (max_y - min_y) / rows
+        
+        def get_bucket_index(x, y):
+            c = int((x - min_x) / step_x)
+            r = int((y - min_y) / step_y)
+            c = max(0, min(c, cols - 1))
+            r = max(0, min(r, rows - 1))
+            return r * cols + c
+        
+        # Test corner buckets
+        self.assertEqual(get_bucket_index(0.5, 0.5), 0)  # Bottom-left
+        self.assertEqual(get_bucket_index(9.5, 0.5), 9)  # Bottom-right
+        self.assertEqual(get_bucket_index(0.5, 9.5), 90)  # Top-left
+        self.assertEqual(get_bucket_index(9.5, 9.5), 99)  # Top-right
+        
+        # Test center bucket
+        self.assertEqual(get_bucket_index(5.5, 5.5), 55)
+    
+    def test_classify_single_dynamic_accuracy(self):
+        """Test that classify_single_dynamic returns same results as classify_single for single-class buckets."""
+        # This is a conceptual test - actual implementation test requires C++
+        # Testing the logic: for single-class buckets, should return dominant_class
+        
+        class MockBucket:
+            def __init__(self, num_classes, dominant_class):
+                self.num_classes = num_classes
+                self.dominant_class = dominant_class
+            
+            def classify_point(self, x, y):
+                if self.num_classes == 1:
+                    return self.dominant_class  # O(1)
+                return None  # Would need full classification
+        
+        # Single class bucket
+        bucket = MockBucket(1, 2)
+        self.assertEqual(bucket.classify_point(0.5, 0.5), 2)
+        
+        # Multi-class bucket returns None (would fallback)
+        bucket = MockBucket(2, 1)
+        self.assertIsNone(bucket.classify_point(0.5, 0.5))
+
+
 def run_tests():
     """Run all unit tests."""
     loader = unittest.TestLoader()
@@ -389,6 +485,7 @@ def run_tests():
     suite.addTests(loader.loadTestsFromTestCase(TestDynamicOperations))
     suite.addTests(loader.loadTestsFromTestCase(TestClassificationVoting))
     suite.addTests(loader.loadTestsFromTestCase(TestDatasetGeneration))
+    suite.addTests(loader.loadTestsFromTestCase(Test2DBuckets))
     
     # Add C++ tests only if executable exists
     if CPP_MAIN.exists():

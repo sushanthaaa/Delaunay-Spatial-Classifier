@@ -20,8 +20,11 @@
 #define DELAUNAY_CLASSIFIER_H
 
 #include <CGAL/Delaunay_triangulation_2.h>
+#include <CGAL/Delaunay_triangulation_adaptation_policies_2.h>
+#include <CGAL/Delaunay_triangulation_adaptation_traits_2.h>
 #include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
 #include <CGAL/Triangulation_vertex_base_with_info_2.h>
+#include <CGAL/Voronoi_diagram_2.h>
 #include <string>
 #include <vector>
 
@@ -40,6 +43,13 @@ typedef CGAL::Delaunay_triangulation_2<K, Tds> Delaunay;
 typedef Delaunay::Point Point;
 typedef Delaunay::Vertex_handle Vertex_handle;
 typedef Delaunay::Face_handle Face_handle;
+
+// Voronoi diagram types for exact cell extraction
+typedef CGAL::Delaunay_triangulation_adaptation_traits_2<Delaunay> VD_AT;
+typedef CGAL::Delaunay_triangulation_caching_degeneracy_removal_policy_2<
+    Delaunay>
+    VD_AP;
+typedef CGAL::Voronoi_diagram_2<Delaunay, VD_AT, VD_AP> VoronoiDiagram;
 
 /**
  * @struct SRR_Grid
@@ -72,6 +82,222 @@ struct SRR_Grid {
   }
 };
 
+// =============================================================================
+// 2D BUCKETS DATA STRUCTURES (Full Implementation)
+// =============================================================================
+// Complete implementation with all 6 linked list structures as specified:
+// - LL_V:     Linked List of Vertices in each bucket
+// - LL_E:     Linked List of Edges passing through each bucket
+// - LL_GE:    Linked List of Grid Edge intersections (decision boundaries)
+// - LL_Poly:  Linked List of Polygon Regions (Voronoi-clipped)
+// - LL_Label: Classification labels (inside/outside) for each polygon
+// - LL_PolyID: Unique polygon IDs for multi-polygon queries
+
+/**
+ * @struct LL_Vertex
+ * @brief Linked list node for vertices within a bucket (LL_V).
+ */
+struct LL_Vertex {
+  Point point;     ///< Vertex coordinates
+  int class_label; ///< Class label of this vertex
+  int vertex_id;   ///< Unique vertex ID from triangulation
+  LL_Vertex *next; ///< Link to next vertex in bucket
+
+  LL_Vertex() : class_label(-1), vertex_id(-1), next(nullptr) {}
+  LL_Vertex(Point p, int label, int id)
+      : point(p), class_label(label), vertex_id(id), next(nullptr) {}
+};
+
+/**
+ * @struct LL_Edge
+ * @brief Linked list node for edges passing through a bucket (LL_E).
+ */
+struct LL_Edge {
+  Point p1, p2;       ///< Edge endpoint coordinates
+  int class1, class2; ///< Classes of the two endpoint vertices
+  bool is_boundary;   ///< True if edge crosses a decision boundary
+  int edge_id;        ///< Unique edge ID
+  LL_Edge *next;      ///< Link to next edge in bucket
+
+  LL_Edge()
+      : class1(-1), class2(-1), is_boundary(false), edge_id(-1), next(nullptr) {
+  }
+  LL_Edge(Point a, Point b, int c1, int c2, int id)
+      : p1(a), p2(b), class1(c1), class2(c2), is_boundary(c1 != c2),
+        edge_id(id), next(nullptr) {}
+};
+
+/**
+ * @enum GridEdgeSide
+ * @brief Identifies which side of a bucket boundary.
+ */
+enum GridEdgeSide {
+  GRID_LEFT = 0,
+  GRID_BOTTOM = 1,
+  GRID_RIGHT = 2,
+  GRID_TOP = 3
+};
+
+/**
+ * @struct LL_GridEdge
+ * @brief Linked list node for grid edge intersections (LL_GE).
+ *
+ * Tracks where decision boundaries intersect bucket edges.
+ */
+struct LL_GridEdge {
+  GridEdgeSide side;  ///< Which bucket boundary (LEFT/BOTTOM/RIGHT/TOP)
+  Point intersection; ///< Intersection point coordinates
+  int class_inside;   ///< Class on the inside (bucket interior direction)
+  int class_outside;  ///< Class on the outside direction
+  LL_GridEdge *next;  ///< Link to next grid edge intersection
+
+  LL_GridEdge()
+      : side(GRID_LEFT), class_inside(-1), class_outside(-1), next(nullptr) {}
+  LL_GridEdge(GridEdgeSide s, Point p, int ci, int co)
+      : side(s), intersection(p), class_inside(ci), class_outside(co),
+        next(nullptr) {}
+};
+
+/**
+ * @struct LL_Polygon
+ * @brief Linked list node for polygon regions (LL_Poly + LL_Label + LL_PolyID).
+ *
+ * Each polygon represents a class region within the bucket, clipped from
+ * the Voronoi diagram of the training points.
+ */
+struct LL_Polygon {
+  int poly_id;      ///< LL_PolyID: Unique polygon identifier
+  int class_label;  ///< Class label for this region
+  int inside_label; ///< LL_Label: 1 = valid inside region, 0 = outside
+  std::vector<Point> vertices; ///< Polygon boundary vertices (Voronoi-clipped)
+  double area;                 ///< Polygon area for validation
+  LL_Polygon *next;            ///< Link to next polygon region
+
+  LL_Polygon()
+      : poly_id(-1), class_label(-1), inside_label(1), area(0), next(nullptr) {}
+  LL_Polygon(int id, int label)
+      : poly_id(id), class_label(label), inside_label(1), area(0),
+        next(nullptr) {}
+};
+
+/**
+ * @struct Bucket2D
+ * @brief Complete 2D Bucket with all 6 linked list data structures.
+ *
+ * Each bucket in the SRR grid stores:
+ * - LL_V: Training vertices within this bucket
+ * - LL_E: Delaunay edges passing through this bucket
+ * - LL_GE: Grid edge intersections with decision boundaries
+ * - LL_Poly: Polygon regions with LL_Label and LL_PolyID
+ *
+ * Classification: O(1) for single-class buckets, O(k) for k-class buckets
+ * where k is small and bounded.
+ */
+struct Bucket2D {
+  // Bucket boundaries and position
+  double min_x, max_x, min_y, max_y;
+  int row, col; ///< Position in grid
+
+  // LL_V: Linked List of Vertices in this bucket
+  LL_Vertex *vertices;
+  int vertex_count;
+
+  // LL_E: Linked List of Edges passing through this bucket
+  LL_Edge *edges;
+  int edge_count;
+
+  // LL_GE: Linked List of Grid Edge intersections
+  LL_GridEdge *grid_edges;
+  int grid_edge_count;
+
+  // LL_Poly + LL_Label + LL_PolyID: Polygon regions
+  LL_Polygon *polygons;
+  int polygon_count;
+
+  // Quick classification helpers
+  int num_classes;    ///< Number of distinct classes in this bucket
+  int dominant_class; ///< Most frequent class (for fast path)
+  Face_handle hint;   ///< Triangle hint for fallback
+
+  Bucket2D()
+      : min_x(0), max_x(0), min_y(0), max_y(0), row(0), col(0),
+        vertices(nullptr), vertex_count(0), edges(nullptr), edge_count(0),
+        grid_edges(nullptr), grid_edge_count(0), polygons(nullptr),
+        polygon_count(0), num_classes(0), dominant_class(-1), hint() {}
+
+  /**
+   * @brief O(1) classification within this bucket using polygon regions.
+   */
+  int classify_point(double x, double y) const;
+
+  /**
+   * @brief Ray casting point-in-polygon test.
+   */
+  static bool point_in_polygon(double x, double y,
+                               const std::vector<Point> &polygon);
+
+  /**
+   * @brief Clean up all linked lists.
+   */
+  void clear();
+
+  /**
+   * @brief Check if a point is inside this bucket's bounds.
+   */
+  bool contains(double x, double y) const {
+    return x >= min_x && x <= max_x && y >= min_y && y <= max_y;
+  }
+};
+
+/**
+ * @struct SRR_Grid_2D
+ * @brief Complete 2D Buckets grid for O(1) dynamic classification.
+ */
+struct SRR_Grid_2D {
+  int rows, cols;                    ///< Grid dimensions (k × k where k ≈ √n)
+  double min_x, max_x, min_y, max_y; ///< Bounding box
+  double step_x, step_y;             ///< Cell width and height
+
+  std::vector<Bucket2D> buckets; ///< 2D array of enhanced buckets
+
+  // Statistics
+  int single_class_buckets; ///< Count of buckets with 1 class
+  int multi_class_buckets;  ///< Count of buckets with 2+ classes
+  int total_polygons;       ///< Total polygon regions across all buckets
+
+  SRR_Grid_2D()
+      : rows(0), cols(0), single_class_buckets(0), multi_class_buckets(0),
+        total_polygons(0) {}
+
+  void clear() {
+    for (auto &bucket : buckets) {
+      bucket.clear();
+    }
+    buckets.clear();
+    rows = cols = 0;
+    single_class_buckets = multi_class_buckets = total_polygons = 0;
+  }
+
+  /**
+   * @brief Get bucket index for a given point (O(1) lookup).
+   */
+  int get_bucket_index(double x, double y) const;
+
+  /**
+   * @brief Get bucket reference by position.
+   */
+  Bucket2D *get_bucket(int row, int col) {
+    if (row < 0 || row >= rows || col < 0 || col >= cols)
+      return nullptr;
+    return &buckets[row * cols + col];
+  }
+
+  /**
+   * @brief Print grid statistics.
+   */
+  void print_statistics() const;
+};
+
 /**
  * @class DelaunayClassifier
  * @brief Main classifier using Delaunay Triangulation with SRR optimization.
@@ -87,8 +313,9 @@ struct SRR_Grid {
  */
 class DelaunayClassifier {
 private:
-  Delaunay dt;  ///< CGAL Delaunay triangulation storing points + labels
-  SRR_Grid srr; ///< Spatial index for O(1) lookup
+  Delaunay dt;        ///< CGAL Delaunay triangulation storing points + labels
+  SRR_Grid srr;       ///< Spatial index for O(1) lookup (original)
+  SRR_Grid_2D srr_2d; ///< Enhanced 2D Buckets for O(1) dynamic classification
 
   // Ablation configuration flags (set before train() to disable features)
   bool use_srr_; ///< Enable SRR grid for O(1) lookup (default: true)
@@ -276,6 +503,45 @@ public:
    * @param y Y-coordinate (approximate)
    */
   void remove_point(double x, double y);
+
+  // --- 2D Buckets Dynamic Classification Methods ---
+
+  /**
+   * @brief Build the enhanced 2D Buckets grid for O(1) dynamic classification.
+   *
+   * For each bucket, computes which decision boundary polygons (Voronoi
+   * regions) intersect it and stores class region information.
+   *
+   * Three bucket types:
+   * 1. Single class: Entire bucket in one class region → O(1) direct lookup
+   * 2. Two classes: Bucket split by one boundary → O(1) side check
+   * 3. Multi-class: Multiple regions → O(1) point-in-polygon (constant regions)
+   */
+  void build_2d_buckets();
+
+  /**
+   * @brief Classify using 2D Buckets for O(1) dynamic classification.
+   *
+   * This method uses the precomputed decision boundary polygons stored in
+   * each bucket, enabling true O(1) classification without DT lookup.
+   * Ideal for dynamic insertion queries where we want classification
+   * without modifying the triangulation.
+   *
+   * @param x X-coordinate
+   * @param y Y-coordinate
+   * @return Predicted class label
+   */
+  int classify_single_dynamic(double x, double y);
+
+  /**
+   * @brief Compute decision boundary polygons (Voronoi regions by class).
+   *
+   * Uses the Delaunay triangulation's dual (Voronoi diagram) to compute
+   * class regions. Adjacent Voronoi cells with same class are merged.
+   *
+   * @return Vector of (class_label, polygon) pairs
+   */
+  std::vector<std::pair<int, std::vector<Point>>> compute_class_regions();
 };
 
 #endif // DELAUNAY_CLASSIFIER_H

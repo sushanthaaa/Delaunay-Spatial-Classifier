@@ -544,8 +544,9 @@ def generate_figure_set(dataset_name, X, y, output_dir, title_prefix=""):
                 facecolor=BACKGROUND_COLOR)
     plt.close()
     
-    # Figure 4: Decision Boundaries (solid=same-class, dashed=cross-class DT edges)
+    # Figure 4: Decision Boundaries WITH SRR Grid (solid=same-class, dashed=cross-class DT edges)
     fig, ax = create_figure()
+    grid_size = max(2, int(np.sqrt(len(X_clean))))
     if len(X_clean) >= 3:
         tri_clean = Delaunay(X_clean)
         # Use class-aware edge plotting: solid for same-class, dashed for cross-class
@@ -553,10 +554,14 @@ def generate_figure_set(dataset_name, X, y, output_dir, title_prefix=""):
                                       same_class_style='-', cross_class_style='--',
                                       linewidth=1.2)
         plot_voronoi_boundaries(ax, X_clean, y_clean, xlim, ylim)
+    
+    # Add SRR grid overlay (dashed gray lines)
+    plot_srr_grid(ax, X_clean, xlim, ylim)
+    
     plot_points(ax, X_clean, y_clean)
     ax.set_xlim(xlim)
     ax.set_ylim(ylim)
-    ax.set_title(f"{title_prefix}(d) Decision Boundaries", fontsize=14, fontweight='bold')
+    ax.set_title(f"{title_prefix}(d) Decision Boundaries + SRR Grid ({grid_size}×{grid_size})", fontsize=14, fontweight='bold')
     plt.savefig(f"{output_dir}/4_decision_boundaries.png", dpi=DPI, bbox_inches='tight',
                 facecolor=BACKGROUND_COLOR)
     plt.close()
@@ -903,7 +908,7 @@ def generate_outside_hull_figure(dataset_name, X_base, y_base, X_stream, y_strea
     plot_delaunay_edges(ax, X_base, tri_base)
     
     # Draw decision boundaries (BLACK lines, extended to axes)
-    plot_decision_boundaries(ax, X_base, y_base, tri_base, xlim=xlim, ylim=ylim)
+    plot_voronoi_boundaries(ax, X_base, y_base, xlim, ylim)
     
     # Draw training points (NORMAL size with correct markers)
     plot_points(ax, X_base, y_base)
@@ -988,7 +993,7 @@ def generate_outside_hull_figure(dataset_name, X_base, y_base, X_stream, y_strea
     plot_delaunay_edges(ax, X_with_query, tri_updated)
     
     # Draw decision boundaries
-    plot_decision_boundaries(ax, X_with_query, y_with_query, tri_updated, xlim=xlim, ylim=ylim)
+    plot_voronoi_boundaries(ax, X_with_query, y_with_query, xlim, ylim)
     
     # Draw original training points
     plot_points(ax, X_base, y_base)

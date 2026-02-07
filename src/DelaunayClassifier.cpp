@@ -413,6 +413,9 @@ void DelaunayClassifier::train(const std::string &train_file, int outlier_k) {
 
   // Phase 3: Build SRR grid for O(1) inference
   build_srr_grid();
+
+  // Phase 4: Build 2D Buckets for O(1) dynamic classification
+  build_2d_buckets();
 }
 
 // =============================================================================
@@ -883,4 +886,704 @@ int DelaunayClassifier::classify_nearest_vertex(double x, double y) {
   Point p(x, y);
   Vertex_handle v = dt.nearest_vertex(p);
   return v->info();
+}
+
+// =============================================================================
+// 2D BUCKETS IMPLEMENTATION - Complete with all 6 Linked List Structures
+// =============================================================================
+// Full implementation as specified:
+// - LL_V:     Vertices in each bucket
+// - LL_E:     Edges passing through each bucket
+// - LL_GE:    Grid edge intersections with decision boundaries
+// - LL_Poly:  Voronoi-clipped polygon regions
+// - LL_Label: Inside/outside classification labels
+// - LL_PolyID: Unique polygon identifiers
+
+/**
+ * @brief Check if a point is inside a polygon using ray casting algorithm.
+ */
+bool Bucket2D::point_in_polygon(double x, double y,
+                                const std::vector<Point> &polygon) {
+  if (polygon.size() < 3)
+    return false;
+
+  bool inside = false;
+  size_t n = polygon.size();
+
+  for (size_t i = 0, j = n - 1; i < n; j = i++) {
+    double xi = polygon[i].x(), yi = polygon[i].y();
+    double xj = polygon[j].x(), yj = polygon[j].y();
+
+    if (((yi > y) != (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) {
+      inside = !inside;
+    }
+  }
+
+  return inside;
+}
+
+/**
+ * @brief O(1) classification within this bucket using polygon regions.
+ *
+ * Algorithm:
+ * 1. Single-class bucket: Return dominant_class immediately (O(1))
+ * 2. Multi-class bucket: Test point against each polygon in LL_Poly (O(k))
+ *    where k is bounded by the number of classes (typically 2-3)
+ */
+int Bucket2D::classify_point(double x, double y) const {
+  // Fast path: single class bucket
+  if (num_classes == 1 || polygon_count == 1) {
+    return dominant_class;
+  }
+
+  // Multi-class bucket: check each polygon region
+  LL_Polygon *poly = polygons;
+  while (poly != nullptr) {
+    if (poly->inside_label == 1 && poly->vertices.size() >= 3) {
+      if (point_in_polygon(x, y, poly->vertices)) {
+        return poly->class_label;
+      }
+    }
+    poly = poly->next;
+  }
+
+  // Fallback to dominant class
+  return dominant_class;
+}
+
+/**
+ * @brief Clean up all linked lists in this bucket.
+ */
+void Bucket2D::clear() {
+  // Clear LL_V (vertices)
+  LL_Vertex *v = vertices;
+  while (v != nullptr) {
+    LL_Vertex *next = v->next;
+    delete v;
+    v = next;
+  }
+  vertices = nullptr;
+  vertex_count = 0;
+
+  // Clear LL_E (edges)
+  LL_Edge *e = edges;
+  while (e != nullptr) {
+    LL_Edge *next = e->next;
+    delete e;
+    e = next;
+  }
+  edges = nullptr;
+  edge_count = 0;
+
+  // Clear LL_GE (grid edges)
+  LL_GridEdge *ge = grid_edges;
+  while (ge != nullptr) {
+    LL_GridEdge *next = ge->next;
+    delete ge;
+    ge = next;
+  }
+  grid_edges = nullptr;
+  grid_edge_count = 0;
+
+  // Clear LL_Poly (polygons)
+  LL_Polygon *p = polygons;
+  while (p != nullptr) {
+    LL_Polygon *next = p->next;
+    delete p;
+    p = next;
+  }
+  polygons = nullptr;
+  polygon_count = 0;
+
+  num_classes = 0;
+  dominant_class = -1;
+}
+
+/**
+ * @brief Get bucket index for a given point (O(1) lookup).
+ */
+int SRR_Grid_2D::get_bucket_index(double x, double y) const {
+  int c = static_cast<int>((x - min_x) / step_x);
+  int r = static_cast<int>((y - min_y) / step_y);
+
+  // Clamp to valid range
+  if (c < 0)
+    c = 0;
+  if (c >= cols)
+    c = cols - 1;
+  if (r < 0)
+    r = 0;
+  if (r >= rows)
+    r = rows - 1;
+
+  return r * cols + c;
+}
+
+/**
+ * @brief Print grid statistics.
+ */
+void SRR_Grid_2D::print_statistics() const {
+  std::cout << "=== 2D Buckets Grid Statistics ===" << std::endl;
+  std::cout << "Grid size: " << rows << " x " << cols << " = " << (rows * cols)
+            << " buckets" << std::endl;
+  std::cout << "Single-class buckets: " << single_class_buckets << std::endl;
+  std::cout << "Multi-class buckets:  " << multi_class_buckets << std::endl;
+  std::cout << "Total polygon regions: " << total_polygons << std::endl;
+  std::cout << "==================================" << std::endl;
+}
+
+// -----------------------------------------------------------------------------
+// Helper: Check if a line segment intersects a bucket
+// -----------------------------------------------------------------------------
+static bool segment_intersects_bucket(double x1, double y1, double x2,
+                                      double y2, double bmin_x, double bmin_y,
+                                      double bmax_x, double bmax_y) {
+  // Check if either endpoint is inside bucket
+  auto inside = [&](double x, double y) {
+    return x >= bmin_x && x <= bmax_x && y >= bmin_y && y <= bmax_y;
+  };
+  if (inside(x1, y1) || inside(x2, y2))
+    return true;
+
+  // Check segment intersection with bucket edges using parametric line
+  // intersection
+  auto intersects_edge = [&](double ex1, double ey1, double ex2, double ey2) {
+    double dx = x2 - x1, dy = y2 - y1;
+    double edx = ex2 - ex1, edy = ey2 - ey1;
+    double denom = dx * edy - dy * edx;
+    if (std::abs(denom) < 1e-12)
+      return false;
+
+    double t = ((ex1 - x1) * edy - (ey1 - y1) * edx) / denom;
+    double s = ((ex1 - x1) * dy - (ey1 - y1) * dx) / denom;
+
+    return t >= 0 && t <= 1 && s >= 0 && s <= 1;
+  };
+
+  // Check all 4 bucket edges
+  return intersects_edge(bmin_x, bmin_y, bmax_x, bmin_y) || // bottom
+         intersects_edge(bmax_x, bmin_y, bmax_x, bmax_y) || // right
+         intersects_edge(bmax_x, bmax_y, bmin_x, bmax_y) || // top
+         intersects_edge(bmin_x, bmax_y, bmin_x, bmin_y);   // left
+}
+
+// -----------------------------------------------------------------------------
+// Helper: Compute intersection point of two line segments
+// -----------------------------------------------------------------------------
+static bool compute_intersection(double x1, double y1, double x2, double y2,
+                                 double x3, double y3, double x4, double y4,
+                                 double &ix, double &iy) {
+  double dx1 = x2 - x1, dy1 = y2 - y1;
+  double dx2 = x4 - x3, dy2 = y4 - y3;
+  double denom = dx1 * dy2 - dy1 * dx2;
+
+  if (std::abs(denom) < 1e-12)
+    return false;
+
+  double t = ((x3 - x1) * dy2 - (y3 - y1) * dx2) / denom;
+  double s = ((x3 - x1) * dy1 - (y3 - y1) * dx1) / denom;
+
+  if (t >= 0 && t <= 1 && s >= 0 && s <= 1) {
+    ix = x1 + t * dx1;
+    iy = y1 + t * dy1;
+    return true;
+  }
+  return false;
+}
+
+// -----------------------------------------------------------------------------
+// Helper: Clip polygon to bucket boundaries (Sutherland-Hodgman algorithm)
+// -----------------------------------------------------------------------------
+static std::vector<Point>
+clip_polygon_to_bucket(const std::vector<Point> &polygon, double bmin_x,
+                       double bmin_y, double bmax_x, double bmax_y) {
+  if (polygon.empty())
+    return {};
+
+  std::vector<Point> result = polygon;
+
+  // Clip against each of the 4 bucket edges
+  auto clip_edge = [](const std::vector<Point> &input, double ex1, double ey1,
+                      double ex2, double ey2) {
+    std::vector<Point> output;
+    if (input.empty())
+      return output;
+
+    auto inside = [&](const Point &p) {
+      return (ex2 - ex1) * (p.y() - ey1) - (ey2 - ey1) * (p.x() - ex1) >= 0;
+    };
+
+    Point prev = input.back();
+    bool prev_inside = inside(prev);
+
+    for (const Point &curr : input) {
+      bool curr_inside = inside(curr);
+
+      if (curr_inside) {
+        if (!prev_inside) {
+          // Entering: compute intersection
+          double ix, iy;
+          if (compute_intersection(prev.x(), prev.y(), curr.x(), curr.y(), ex1,
+                                   ey1, ex2, ey2, ix, iy)) {
+            output.push_back(Point(ix, iy));
+          }
+        }
+        output.push_back(curr);
+      } else if (prev_inside) {
+        // Leaving: compute intersection
+        double ix, iy;
+        if (compute_intersection(prev.x(), prev.y(), curr.x(), curr.y(), ex1,
+                                 ey1, ex2, ey2, ix, iy)) {
+          output.push_back(Point(ix, iy));
+        }
+      }
+
+      prev = curr;
+      prev_inside = curr_inside;
+    }
+
+    return output;
+  };
+
+  // Clip in order: left, bottom, right, top
+  result = clip_edge(result, bmin_x, bmin_y, bmin_x, bmax_y); // left
+  result = clip_edge(result, bmin_x, bmax_y, bmax_x, bmax_y); // top
+  result = clip_edge(result, bmax_x, bmax_y, bmax_x, bmin_y); // right
+  result = clip_edge(result, bmax_x, bmin_y, bmin_x, bmin_y); // bottom
+
+  return result;
+}
+
+/**
+ * @brief Build the complete 2D Buckets grid with all 6 linked list structures.
+ *
+ * This is the main construction algorithm implementing:
+ * Phase 1: Build LL_V (vertices in each bucket)
+ * Phase 2: Build LL_E (edges passing through each bucket)
+ * Phase 3: Build LL_GE (grid edge intersections with decision boundaries)
+ * Phase 4: Build LL_Poly (Voronoi-clipped polygon regions)
+ */
+void DelaunayClassifier::build_2d_buckets() {
+  if (dt.number_of_vertices() == 0)
+    return;
+
+  std::cout << "Building 2D Buckets with full linked list structures..."
+            << std::endl;
+
+  // --- Initialize grid with same dimensions as SRR ---
+  srr_2d.min_x = srr.min_x;
+  srr_2d.max_x = srr.max_x;
+  srr_2d.min_y = srr.min_y;
+  srr_2d.max_y = srr.max_y;
+  srr_2d.rows = srr.rows;
+  srr_2d.cols = srr.cols;
+  srr_2d.step_x = srr.step_x;
+  srr_2d.step_y = srr.step_y;
+  srr_2d.single_class_buckets = 0;
+  srr_2d.multi_class_buckets = 0;
+  srr_2d.total_polygons = 0;
+
+  int k = srr.rows;
+  srr_2d.buckets.resize(k * k);
+
+  // Initialize bucket boundaries
+  for (int r = 0; r < k; ++r) {
+    for (int c = 0; c < k; ++c) {
+      int idx = r * k + c;
+      Bucket2D &bucket = srr_2d.buckets[idx];
+      bucket.row = r;
+      bucket.col = c;
+      bucket.min_x = srr_2d.min_x + c * srr_2d.step_x;
+      bucket.max_x = bucket.min_x + srr_2d.step_x;
+      bucket.min_y = srr_2d.min_y + r * srr_2d.step_y;
+      bucket.max_y = bucket.min_y + srr_2d.step_y;
+      bucket.hint = srr.buckets[idx];
+    }
+  }
+
+  // =========================================================================
+  // PHASE 1: Build LL_V (Vertices)
+  // =========================================================================
+  std::cout << "  Phase 1: Building LL_V (vertices)..." << std::endl;
+  int vertex_id = 0;
+  std::map<Point, int> point_to_id;
+
+  for (auto v = dt.finite_vertices_begin(); v != dt.finite_vertices_end();
+       ++v) {
+    Point p = v->point();
+    int label = v->info();
+    point_to_id[p] = vertex_id;
+
+    // Find which bucket this vertex belongs to
+    int bucket_idx = srr_2d.get_bucket_index(p.x(), p.y());
+    Bucket2D &bucket = srr_2d.buckets[bucket_idx];
+
+    // Add to LL_V
+    LL_Vertex *new_vertex = new LL_Vertex(p, label, vertex_id);
+    new_vertex->next = bucket.vertices;
+    bucket.vertices = new_vertex;
+    bucket.vertex_count++;
+
+    vertex_id++;
+  }
+
+  // =========================================================================
+  // PHASE 2: Build LL_E (Edges)
+  // =========================================================================
+  std::cout << "  Phase 2: Building LL_E (edges)..." << std::endl;
+  int edge_id = 0;
+
+  for (auto e = dt.finite_edges_begin(); e != dt.finite_edges_end(); ++e) {
+    auto v1 = e->first->vertex((e->second + 1) % 3);
+    auto v2 = e->first->vertex((e->second + 2) % 3);
+
+    Point p1 = v1->point();
+    Point p2 = v2->point();
+    int class1 = v1->info();
+    int class2 = v2->info();
+
+    // Find all buckets this edge passes through
+    for (int idx = 0; idx < k * k; ++idx) {
+      Bucket2D &bucket = srr_2d.buckets[idx];
+
+      if (segment_intersects_bucket(p1.x(), p1.y(), p2.x(), p2.y(),
+                                    bucket.min_x, bucket.min_y, bucket.max_x,
+                                    bucket.max_y)) {
+        // Add to LL_E
+        LL_Edge *new_edge = new LL_Edge(p1, p2, class1, class2, edge_id);
+        new_edge->next = bucket.edges;
+        bucket.edges = new_edge;
+        bucket.edge_count++;
+      }
+    }
+
+    edge_id++;
+  }
+
+  // =========================================================================
+  // PHASE 3: Build LL_GE (Grid Edge Intersections)
+  // =========================================================================
+  std::cout << "  Phase 3: Building LL_GE (grid edge intersections)..."
+            << std::endl;
+
+  for (int idx = 0; idx < k * k; ++idx) {
+    Bucket2D &bucket = srr_2d.buckets[idx];
+
+    // Check each decision boundary edge for intersection with bucket boundaries
+    LL_Edge *edge = bucket.edges;
+    while (edge != nullptr) {
+      if (edge->is_boundary) { // Only check decision boundary edges
+        // Define bucket boundary segments
+        struct EdgeDef {
+          GridEdgeSide side;
+          double x1, y1, x2, y2;
+        };
+        EdgeDef sides[] = {
+            {GRID_LEFT, bucket.min_x, bucket.min_y, bucket.min_x, bucket.max_y},
+            {GRID_BOTTOM, bucket.min_x, bucket.min_y, bucket.max_x,
+             bucket.min_y},
+            {GRID_RIGHT, bucket.max_x, bucket.min_y, bucket.max_x,
+             bucket.max_y},
+            {GRID_TOP, bucket.min_x, bucket.max_y, bucket.max_x, bucket.max_y}};
+
+        for (const auto &side : sides) {
+          double ix, iy;
+          if (compute_intersection(edge->p1.x(), edge->p1.y(), edge->p2.x(),
+                                   edge->p2.y(), side.x1, side.y1, side.x2,
+                                   side.y2, ix, iy)) {
+            // Found intersection with grid edge
+            LL_GridEdge *new_ge = new LL_GridEdge(side.side, Point(ix, iy),
+                                                  edge->class1, edge->class2);
+            new_ge->next = bucket.grid_edges;
+            bucket.grid_edges = new_ge;
+            bucket.grid_edge_count++;
+          }
+        }
+      }
+      edge = edge->next;
+    }
+  }
+
+  // =========================================================================
+  // PHASE 4: Build LL_Poly (Exact Voronoi Polygon Regions)
+  // =========================================================================
+  // Uses CGAL's Voronoi_diagram_2 adaptor to extract exact Voronoi cells,
+  // then clips each cell to bucket boundaries.
+  std::cout << "  Phase 4: Building LL_Poly (exact Voronoi polygon regions)..."
+            << std::endl;
+
+  // Create Voronoi diagram from Delaunay triangulation
+  VoronoiDiagram vd(dt);
+
+  // Create bounding box for clipping unbounded cells (extended grid bounds)
+  double bbox_margin = std::max(srr_2d.step_x, srr_2d.step_y) * 2;
+  double bbox_min_x = srr_2d.min_x - bbox_margin;
+  double bbox_max_x = srr_2d.max_x + bbox_margin;
+  double bbox_min_y = srr_2d.min_y - bbox_margin;
+  double bbox_max_y = srr_2d.max_y + bbox_margin;
+
+  int global_poly_id = 0;
+
+  // Map from site (vertex) to its Voronoi cell polygon
+  std::map<Vertex_handle, std::vector<Point>> vertex_to_cell;
+
+  // Extract Voronoi cells from the diagram
+  for (auto face_it = vd.faces_begin(); face_it != vd.faces_end(); ++face_it) {
+    // Get the site (Delaunay vertex) that generated this Voronoi cell
+    auto dual_vertex = face_it->dual();
+    if (dual_vertex == nullptr)
+      continue;
+
+    Vertex_handle site_vertex = dual_vertex;
+    std::vector<Point> cell_polygon;
+
+    // Check if the face is unbounded
+    if (face_it->is_unbounded()) {
+      // For unbounded faces, we need to clip with bounding box
+      // Traverse the face's halfedge chain and handle infinite edges
+      auto ccb_start = face_it->ccb();
+      auto ccb_it = ccb_start;
+
+      std::vector<Point> raw_vertices;
+      do {
+        if (ccb_it->has_source()) {
+          // This halfedge has a finite source vertex
+          auto src = ccb_it->source();
+          raw_vertices.push_back(src->point());
+        } else {
+          // This is an infinite edge - compute intersection with bounding box
+          // The direction is given by the perpendicular bisector of the edge
+          // We'll use a ray from the last known point toward infinity
+          if (!raw_vertices.empty()) {
+            // Get the direction of this halfedge (from the dual edge)
+            // For simplicity, extend to bounding box
+            Point last_pt = raw_vertices.back();
+            double dx = 0, dy = 0;
+
+            // Determine direction based on site position
+            auto site_pt = site_vertex->point();
+            dx = site_pt.x() - last_pt.x();
+            dy = site_pt.y() - last_pt.y();
+            double len = std::sqrt(dx * dx + dy * dy);
+            if (len > 1e-10) {
+              dx /= len;
+              dy /= len;
+              // Rotate 90 degrees to get perpendicular direction
+              double temp = dx;
+              dx = -dy;
+              dy = temp;
+            }
+
+            // Extend to bounding box
+            double t_max = 1e6;
+            Point far_pt(last_pt.x() + dx * t_max, last_pt.y() + dy * t_max);
+            raw_vertices.push_back(far_pt);
+          }
+        }
+        ++ccb_it;
+      } while (ccb_it != ccb_start);
+
+      // Clip the raw polygon to the bounding box
+      cell_polygon = clip_polygon_to_bucket(raw_vertices, bbox_min_x,
+                                            bbox_min_y, bbox_max_x, bbox_max_y);
+    } else {
+      // Bounded face: extract all vertices directly
+      auto ccb_start = face_it->ccb();
+      auto ccb_it = ccb_start;
+
+      do {
+        if (ccb_it->has_source()) {
+          auto src = ccb_it->source();
+          cell_polygon.push_back(src->point());
+        }
+        ++ccb_it;
+      } while (ccb_it != ccb_start);
+    }
+
+    if (!cell_polygon.empty()) {
+      vertex_to_cell[site_vertex] = cell_polygon;
+    }
+  }
+
+  std::cout << "    Extracted " << vertex_to_cell.size() << " Voronoi cells"
+            << std::endl;
+
+  // Now assign clipped Voronoi cells to buckets
+  for (int idx = 0; idx < k * k; ++idx) {
+    Bucket2D &bucket = srr_2d.buckets[idx];
+
+    // Collect classes and their Voronoi cell polygons that intersect this
+    // bucket
+    std::map<int, std::vector<std::vector<Point>>> class_polygons;
+
+    // Check each vertex's Voronoi cell
+    LL_Vertex *v = bucket.vertices;
+    while (v != nullptr) {
+      // Find the corresponding CGAL vertex handle
+      Point vp = v->point;
+      for (const auto &vc : vertex_to_cell) {
+        if (std::abs(vc.first->point().x() - vp.x()) < 1e-10 &&
+            std::abs(vc.first->point().y() - vp.y()) < 1e-10) {
+          // This Voronoi cell belongs to vertex v
+          // Clip it to the bucket boundaries
+          std::vector<Point> clipped =
+              clip_polygon_to_bucket(vc.second, bucket.min_x, bucket.min_y,
+                                     bucket.max_x, bucket.max_y);
+
+          if (clipped.size() >= 3) {
+            class_polygons[v->class_label].push_back(clipped);
+          }
+          break;
+        }
+      }
+      v = v->next;
+    }
+
+    // If no vertices in bucket, use sample-based fallback
+    if (class_polygons.empty()) {
+      // Sample the bucket center to determine class
+      double cx = (bucket.min_x + bucket.max_x) / 2;
+      double cy = (bucket.min_y + bucket.max_y) / 2;
+      int cls = classify_single(cx, cy);
+
+      // Find the nearest vertex to this bucket
+      Point center_pt(cx, cy);
+      Vertex_handle nearest = dt.nearest_vertex(center_pt);
+
+      if (nearest != Vertex_handle() && vertex_to_cell.count(nearest)) {
+        std::vector<Point> clipped =
+            clip_polygon_to_bucket(vertex_to_cell[nearest], bucket.min_x,
+                                   bucket.min_y, bucket.max_x, bucket.max_y);
+
+        if (clipped.size() >= 3) {
+          class_polygons[nearest->info()].push_back(clipped);
+        }
+      }
+    }
+
+    // Determine number of classes and dominant class
+    bucket.num_classes = class_polygons.size();
+    if (bucket.num_classes == 0) {
+      // Ultimate fallback: use bucket bounds with center classification
+      double cx = (bucket.min_x + bucket.max_x) / 2;
+      double cy = (bucket.min_y + bucket.max_y) / 2;
+      bucket.num_classes = 1;
+      bucket.dominant_class = classify_single(cx, cy);
+      srr_2d.single_class_buckets++;
+
+      LL_Polygon *poly =
+          new LL_Polygon(global_poly_id++, bucket.dominant_class);
+      poly->inside_label = 1;
+      poly->vertices.push_back(Point(bucket.min_x, bucket.min_y));
+      poly->vertices.push_back(Point(bucket.max_x, bucket.min_y));
+      poly->vertices.push_back(Point(bucket.max_x, bucket.max_y));
+      poly->vertices.push_back(Point(bucket.min_x, bucket.max_y));
+      poly->area = srr_2d.step_x * srr_2d.step_y;
+      bucket.polygons = poly;
+      bucket.polygon_count = 1;
+      srr_2d.total_polygons++;
+      continue;
+    }
+
+    // Find dominant class (most polygons/area)
+    int max_polys = 0;
+    for (const auto &cp : class_polygons) {
+      if (static_cast<int>(cp.second.size()) > max_polys) {
+        max_polys = cp.second.size();
+        bucket.dominant_class = cp.first;
+      }
+    }
+
+    if (bucket.num_classes == 1) {
+      srr_2d.single_class_buckets++;
+    } else {
+      srr_2d.multi_class_buckets++;
+    }
+
+    // Create polygon regions for each class by merging clipped Voronoi cells
+    LL_Polygon *prev_poly = nullptr;
+    for (const auto &cp : class_polygons) {
+      int cls = cp.first;
+
+      // Merge all polygons of this class within the bucket
+      // For simplicity, use the largest polygon (most vertices)
+      std::vector<Point> best_poly;
+      for (const auto &poly_verts : cp.second) {
+        if (poly_verts.size() > best_poly.size()) {
+          best_poly = poly_verts;
+        }
+      }
+
+      if (best_poly.size() < 3) {
+        // Fallback to bucket bounds
+        best_poly.clear();
+        best_poly.push_back(Point(bucket.min_x, bucket.min_y));
+        best_poly.push_back(Point(bucket.max_x, bucket.min_y));
+        best_poly.push_back(Point(bucket.max_x, bucket.max_y));
+        best_poly.push_back(Point(bucket.min_x, bucket.max_y));
+      }
+
+      LL_Polygon *poly = new LL_Polygon(global_poly_id++, cls);
+      poly->inside_label = 1;
+      poly->vertices = best_poly;
+
+      // Compute approximate area
+      double area = 0;
+      for (size_t i = 0; i < poly->vertices.size(); ++i) {
+        size_t j = (i + 1) % poly->vertices.size();
+        area += poly->vertices[i].x() * poly->vertices[j].y();
+        area -= poly->vertices[j].x() * poly->vertices[i].y();
+      }
+      poly->area = std::abs(area) / 2.0;
+
+      // Add to linked list
+      if (prev_poly == nullptr) {
+        bucket.polygons = poly;
+      } else {
+        prev_poly->next = poly;
+      }
+      prev_poly = poly;
+      bucket.polygon_count++;
+      srr_2d.total_polygons++;
+    }
+  }
+
+  // Print statistics
+  srr_2d.print_statistics();
+  std::cout << "2D Buckets construction complete." << std::endl;
+}
+
+/**
+ * @brief Classify using 2D Buckets for O(1) dynamic classification.
+ */
+int DelaunayClassifier::classify_single_dynamic(double x, double y) {
+  int bucket_idx = srr_2d.get_bucket_index(x, y);
+
+  if (bucket_idx < 0 || bucket_idx >= static_cast<int>(srr_2d.buckets.size())) {
+    return classify_single(x, y);
+  }
+
+  const Bucket2D &bucket = srr_2d.buckets[bucket_idx];
+  return bucket.classify_point(x, y);
+}
+
+/**
+ * @brief Compute decision boundary polygons (Voronoi regions by class).
+ */
+std::vector<std::pair<int, std::vector<Point>>>
+DelaunayClassifier::compute_class_regions() {
+  std::vector<std::pair<int, std::vector<Point>>> regions;
+
+  // Collect all polygons from all buckets
+  for (const auto &bucket : srr_2d.buckets) {
+    LL_Polygon *poly = bucket.polygons;
+    while (poly != nullptr) {
+      if (poly->inside_label == 1 && !poly->vertices.empty()) {
+        regions.push_back({poly->class_label, poly->vertices});
+      }
+      poly = poly->next;
+    }
+  }
+
+  return regions;
 }

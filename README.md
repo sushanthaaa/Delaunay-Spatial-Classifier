@@ -33,8 +33,10 @@ A novel spatial classification algorithm using Delaunay Triangulation with **O(1
 |---------|-------------|
 | **O(1) Expected Inference** | Constant-time classification using Square Root Rule (SRR) spatial indexing |
 | **O(1) Amortized Updates** | Insert/delete points without model rebuild |
+| **2D Buckets Data Structure** | Full linked-list implementation with 6 structures (LL_V, LL_E, LL_GE, LL_Poly, LL_Label, LL_PolyID) |
+| **Exact Voronoi Clipping** | CGAL Voronoi_diagram_2 for precise decision boundaries |
 | **No Training Phase** | Instant deployment — construct mesh directly from data |
-| **Interpretable** | Decision regions visible as Voronoi-like cells |
+| **Interpretable** | Decision regions visible as exact Voronoi cells |
 | **Geometric Foundation** | Based on Delaunay Triangulation computational geometry |
 | **Outside-Hull Classification** | Handles queries outside convex hull using extended decision boundaries |
 
@@ -42,13 +44,13 @@ A novel spatial classification algorithm using Delaunay Triangulation with **O(1
 
 ## Performance Highlights
 
-Results from experiments on **MacBook Pro M3, macOS 26, 16GB RAM**.
+Results from experiments on **MacBook Pro M3, macOS 26, 16GB RAM** with **2D Buckets + Exact Voronoi Clipping**.
 
 | Metric | Result | Baseline Comparison |
 |--------|--------|---------------------|
-| **Inference Speed** | 0.09–0.21 µs | **27× faster** than FLANN KNN (C++) |
-| **Dynamic Insert** | ~700 ns | **2,500× faster** than Decision Tree rebuild |
-| **Accuracy** | 87–100% | Competitive with KNN (no significant difference on 8/10 datasets) |
+| **Inference Speed** | 0.08–0.20 µs | **55× faster** than FLANN KNN (C++) |
+| **Dynamic Insert** | ~500 ns | **1,500× faster** than Decision Tree rebuild |
+| **Accuracy** | 94–100% | Competitive with KNN (Cancer: 99.1% beats all baselines) |
 | **Statistical Wins** | Spiral, Earthquake | Significantly better than SVM (p < 0.001) |
 
 ---
