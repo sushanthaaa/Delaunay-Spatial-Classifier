@@ -2,36 +2,10 @@
  * @file benchmark.cpp
  * @brief Fair C++ Benchmark Suite for Delaunay Classifier vs. Baselines
  *
- * This file provides a FAIR algorithmic comparison by implementing ALL methods
- * in C++ with -O3 optimization. This eliminates Python/C++ interop overhead
- * that would skew timing comparisons.
- *
- * Baseline Implementations:
- * 1. FLANN KNN (k=5): Modern KD-tree based approximate nearest neighbors
- *    - Uses FLANN library for efficient indexing
- *    - k=5 matches sklearn's default for fair comparison with CV results
- *
- * 2. LibSVM (RBF): Support Vector Machine with radial basis function kernel
- *    - Uses official LibSVM C implementation
- *    - Default γ=0.5, C=1.0 parameters
- *
- * 3. C++ Decision Tree: Custom axis-aligned split implementation
- *    - Gini impurity criterion
- *    - max_depth=15, min_samples=2 to prevent overfitting
- *
- * 4. Delaunay C++ (Ours): Our proposed classifier
- *    - O(n log n) training via CGAL Delaunay construction
- *    - O(1) inference via SRR grid optimization
- *
- * Benchmark Types:
- * - STATIC: Measures training time and per-point inference time
- * - DYNAMIC: Measures insert/move/delete times for incremental updates
- *
- * Usage: ./benchmark <train_csv> <test_csv> <dataset_name>
- * Output: results/cpp_benchmark_<dataset_name>.csv
- *
- * @note All timing uses std::chrono::high_resolution_clock for precision.
- * @note Results are averaged over all test points for statistical stability.
+ * FIXES APPLIED:
+ * #10: Direct move timing (not insert+delete approximation)
+ * #15: Adaptive SVM gamma based on data variance
+ * #16: Adaptive Decision Tree depth based on dataset size
  */
 
 #include <algorithm>
@@ -41,49 +15,35 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <numeric>
 #include <sstream>
 #include <svm.h>
 #include <vector>
 
-// Include our Delaunay classifier
 #include "../include/DelaunayClassifier.h"
 
 // =============================================================================
 // RESULT STRUCTURES
 // =============================================================================
 
-/**
- * @struct BenchmarkResult
- * @brief Stores results from static (inference) benchmarks.
- */
 struct BenchmarkResult {
   std::string method;
   double accuracy;
-  double avg_inference_us; // Microseconds per classification
-  double train_time_ms;    // Milliseconds for training
+  double avg_inference_us;
+  double train_time_ms;
 };
 
-/**
- * @struct DynamicResult
- * @brief Stores results from dynamic (insert/move/delete) benchmarks.
- */
 struct DynamicResult {
   std::string method;
-  double insert_ns; // Nanoseconds per insert
-  double move_ns;   // Nanoseconds per move
-  double delete_ns; // Nanoseconds per delete
+  double insert_ns;
+  double move_ns;
+  double delete_ns;
 };
 
 // =============================================================================
 // DATA LOADING
 // =============================================================================
 
-/**
- * @brief Load labeled CSV data (format: x,y,label).
- *
- * Uses float for compatibility with FLANN which expects float*.
- * The label is stored as int for classification.
- */
 std::vector<std::tuple<float, float, int>>
 load_labeled_csv(const std::string &filepath) {
   std::vector<std::tuple<float, float, int>> points;
@@ -94,6 +54,8 @@ load_labeled_csv(const std::string &filepath) {
   }
   std::string line;
   while (std::getline(file, line)) {
+    if (line.empty())
+      continue;
     std::stringstream ss(line);
     std::string val;
     float x, y;
@@ -109,9 +71,59 @@ load_labeled_csv(const std::string &filepath) {
   return points;
 }
 
-// ============================================
+// =============================================================================
+// HELPER: Compute data statistics for adaptive parameters
+// =============================================================================
+
+struct DataStats {
+  double mean_x, mean_y;
+  double var_x, var_y;
+  double total_variance;
+  float x_min, x_max, y_min, y_max;
+};
+
+DataStats
+compute_data_stats(const std::vector<std::tuple<float, float, int>> &data) {
+  DataStats stats = {};
+  int n = static_cast<int>(data.size());
+  if (n == 0)
+    return stats;
+
+  stats.x_min = stats.y_min = 1e18f;
+  stats.x_max = stats.y_max = -1e18f;
+
+  for (const auto &pt : data) {
+    float x = std::get<0>(pt), y = std::get<1>(pt);
+    stats.mean_x += x;
+    stats.mean_y += y;
+    if (x < stats.x_min)
+      stats.x_min = x;
+    if (x > stats.x_max)
+      stats.x_max = x;
+    if (y < stats.y_min)
+      stats.y_min = y;
+    if (y > stats.y_max)
+      stats.y_max = y;
+  }
+  stats.mean_x /= n;
+  stats.mean_y /= n;
+
+  for (const auto &pt : data) {
+    float x = std::get<0>(pt), y = std::get<1>(pt);
+    stats.var_x += (x - stats.mean_x) * (x - stats.mean_x);
+    stats.var_y += (y - stats.mean_y) * (y - stats.mean_y);
+  }
+  stats.var_x /= n;
+  stats.var_y /= n;
+  stats.total_variance = stats.var_x + stats.var_y;
+
+  return stats;
+}
+
+// =============================================================================
 // FLANN-based KNN classifier
-// ============================================
+// =============================================================================
+
 class FlannKNN {
 private:
   flann::Index<flann::L2<float>> *index_;
@@ -133,7 +145,7 @@ public:
   }
 
   void fit(const std::vector<std::tuple<float, float, int>> &train_data) {
-    int n = train_data.size();
+    int n = static_cast<int>(train_data.size());
     float *data = new float[n * 2];
     labels_.resize(n);
 
@@ -168,8 +180,7 @@ public:
       }
     }
 
-    int best_label = -1;
-    int best_count = 0;
+    int best_label = -1, best_count = 0;
     for (const auto &v : votes) {
       if (v.second > best_count) {
         best_count = v.second;
@@ -180,9 +191,10 @@ public:
   }
 };
 
-// ============================================
-// LibSVM C++ Wrapper
-// ============================================
+// =============================================================================
+// LibSVM Wrapper — FIX #15: Adaptive gamma
+// =============================================================================
+
 class SVMClassifier {
 private:
   svm_model *model_;
@@ -192,11 +204,10 @@ private:
 
 public:
   SVMClassifier() : model_(nullptr) {
-    // RBF kernel parameters
     param_.svm_type = C_SVC;
     param_.kernel_type = RBF;
-    param_.gamma = 0.5;
-    param_.C = 1.0;
+    param_.gamma = 0.5; // Will be overridden in fit()
+    param_.C = 1.0;     // Will be overridden in fit()
     param_.cache_size = 100;
     param_.eps = 0.001;
     param_.shrinking = 1;
@@ -214,7 +225,27 @@ public:
   }
 
   void fit(const std::vector<std::tuple<float, float, int>> &train_data) {
-    int n = train_data.size();
+    int n = static_cast<int>(train_data.size());
+
+    // FIX #15: Adaptive gamma = 1 / (n_features * variance)
+    // This is the standard scikit-learn 'scale' heuristic
+    DataStats stats = compute_data_stats(train_data);
+    double variance = stats.total_variance;
+    if (variance > 1e-10) {
+      param_.gamma = 1.0 / (2.0 * variance);
+    } else {
+      param_.gamma = 1.0; // Fallback for zero-variance data
+    }
+
+    // FIX #15: Also use a reasonable C value based on data scale
+    // Common heuristic: C = 1.0 works well when data is normalized;
+    // for unnormalized data, scale C by the reciprocal of variance
+    if (variance > 1e-10) {
+      param_.C = std::max(1.0, 1.0 / variance);
+    } else {
+      param_.C = 1.0;
+    }
+
     prob_.l = n;
     prob_.y = new double[n];
     prob_.x = new svm_node *[n];
@@ -226,14 +257,13 @@ public:
       x[0].value = std::get<0>(train_data[i]);
       x[1].index = 2;
       x[1].value = std::get<1>(train_data[i]);
-      x[2].index = -1; // End marker
+      x[2].index = -1;
       prob_.x[i] = x;
       x_space_.push_back(x);
     }
 
     // Suppress libsvm output
     svm_set_print_string_function([](const char *) {});
-
     model_ = svm_train(&prob_, &param_);
 
     delete[] prob_.y;
@@ -251,9 +281,10 @@ public:
   }
 };
 
-// ============================================
-// Simple C++ Decision Tree (Axis-Aligned Splits)
-// ============================================
+// =============================================================================
+// Decision Tree — FIX #16: Adaptive depth
+// =============================================================================
+
 struct DTNode {
   bool is_leaf;
   int label;
@@ -285,7 +316,7 @@ private:
       counts[l]++;
     float impurity = 1.0f;
     for (const auto &c : counts) {
-      float p = (float)c.second / labels.size();
+      float p = (float)c.second / (float)labels.size();
       impurity -= p * p;
     }
     return impurity;
@@ -298,6 +329,7 @@ private:
     for (const auto &pt : data)
       label_counts[std::get<2>(pt)]++;
 
+    // Leaf conditions: pure node, max depth reached, or too few samples
     if (label_counts.size() == 1 || depth >= max_depth_ ||
         (int)data.size() < min_samples_) {
       node->is_leaf = true;
@@ -323,8 +355,9 @@ private:
       }
       std::sort(values.begin(), values.end());
 
-      for (size_t i = 1; i < values.size();
-           i += std::max(1, (int)(values.size() / 10))) {
+      // Sample split candidates (every ~5% of sorted values)
+      int step = std::max(1, (int)(values.size() / 20));
+      for (size_t i = 1; i < values.size(); i += step) {
         float split = (values[i - 1] + values[i]) / 2;
 
         std::vector<int> left_labels, right_labels;
@@ -339,9 +372,10 @@ private:
         if (left_labels.empty() || right_labels.empty())
           continue;
 
-        float weighted_gini = (left_labels.size() * gini(left_labels) +
-                               right_labels.size() * gini(right_labels)) /
-                              data.size();
+        float weighted_gini =
+            ((float)left_labels.size() * gini(left_labels) +
+             (float)right_labels.size() * gini(right_labels)) /
+            (float)data.size();
 
         if (weighted_gini < best_gini) {
           best_gini = weighted_gini;
@@ -391,6 +425,7 @@ private:
   }
 
 public:
+  // FIX #16: Accept adaptive max_depth parameter
   DecisionTreeCpp(int max_depth = 10, int min_samples = 2)
       : root_(nullptr), max_depth_(max_depth), min_samples_(min_samples) {}
 
@@ -403,21 +438,23 @@ public:
   int predict(float x, float y) { return predict_node(root_, x, y); }
 };
 
-// ============================================
-// Print results
-// ============================================
+// =============================================================================
+// PRINT RESULTS
+// =============================================================================
+
 void print_static_results(const std::vector<BenchmarkResult> &results,
                           const std::string &dataset_name) {
   std::cout << "\n" << std::string(95, '=') << std::endl;
   std::cout << "C++ STATIC BENCHMARK: " << dataset_name << std::endl;
   std::cout << std::string(95, '-') << std::endl;
   printf("%-30s | %-10s | %-15s | %-12s | %-10s\n", "Algorithm", "Accuracy",
-         "Inference (µs)", "Train (ms)", "Speedup");
+         "Inference (us)", "Train (ms)", "Speedup");
   std::cout << std::string(95, '-') << std::endl;
 
-  double baseline_time = results[0].avg_inference_us;
+  double baseline_time = results.empty() ? 1.0 : results[0].avg_inference_us;
   for (const auto &r : results) {
-    double speedup = baseline_time / r.avg_inference_us;
+    double speedup =
+        (r.avg_inference_us > 0) ? baseline_time / r.avg_inference_us : 0;
     printf("%-30s | %6.1f%%   | %12.4f    | %9.2f   | %7.1fx\n",
            r.method.c_str(), r.accuracy * 100, r.avg_inference_us,
            r.train_time_ms, speedup);
@@ -446,6 +483,10 @@ void print_dynamic_results(const std::vector<DynamicResult> &results,
   std::cout << std::string(95, '=') << std::endl;
 }
 
+// =============================================================================
+// MAIN
+// =============================================================================
+
 int main(int argc, char *argv[]) {
   if (argc < 4) {
     std::cout << "Usage: ./benchmark <train_csv> <test_csv> <dataset_name>"
@@ -468,11 +509,18 @@ int main(int argc, char *argv[]) {
   std::cout << "Loaded " << train_data.size() << " training points, "
             << test_data.size() << " test points." << std::endl;
 
+  // Compute data statistics for adaptive parameters
+  DataStats stats = compute_data_stats(train_data);
+  std::cout << "Data Stats: variance=" << stats.total_variance << ", range_x=["
+            << stats.x_min << "," << stats.x_max << "]"
+            << ", range_y=[" << stats.y_min << "," << stats.y_max << "]"
+            << std::endl;
+
   std::vector<BenchmarkResult> static_results;
   std::vector<DynamicResult> dynamic_results;
 
   // ============================================
-  // STATIC BENCHMARK 1: FLANN C++ KNN (k=5)
+  // STATIC 1: FLANN C++ KNN (k=5)
   // ============================================
   {
     std::cout << "\nRunning FLANN C++ KNN (k=5)..." << std::endl;
@@ -507,10 +555,12 @@ int main(int argc, char *argv[]) {
   }
 
   // ============================================
-  // STATIC BENCHMARK 2: LibSVM C++
+  // STATIC 2: LibSVM — FIX #15: Adaptive gamma
   // ============================================
   {
-    std::cout << "Running LibSVM C++ (RBF)..." << std::endl;
+    std::cout << "Running LibSVM C++ (RBF, adaptive gamma="
+              << 1.0 / (2.0 * std::max(stats.total_variance, 1e-10)) << ")..."
+              << std::endl;
     SVMClassifier svm;
 
     auto train_start = std::chrono::high_resolution_clock::now();
@@ -537,18 +587,24 @@ int main(int argc, char *argv[]) {
     double avg_us = total_us / test_data.size();
     double accuracy = (double)correct / test_data.size();
 
-    static_results.push_back({"LibSVM C++ (RBF)", accuracy, avg_us, train_ms});
+    static_results.push_back(
+        {"LibSVM C++ (RBF, adaptive)", accuracy, avg_us, train_ms});
   }
 
   // ============================================
-  // STATIC BENCHMARK 3: C++ Decision Tree
+  // STATIC 3: Decision Tree — FIX #16: Adaptive depth
   // ============================================
   {
-    std::cout << "Running C++ Decision Tree..." << std::endl;
-    DecisionTreeCpp dt(15, 2);
+    // FIX #16: depth = min(20, max(5, 2 * log2(n)))
+    int adaptive_depth = std::min(
+        20, std::max(5, (int)(2.0 * std::log2((double)train_data.size()))));
+    std::cout << "Running C++ Decision Tree (adaptive depth=" << adaptive_depth
+              << ")..." << std::endl;
+
+    DecisionTreeCpp dt_clf(adaptive_depth, 2);
 
     auto train_start = std::chrono::high_resolution_clock::now();
-    dt.fit(train_data);
+    dt_clf.fit(train_data);
     auto train_end = std::chrono::high_resolution_clock::now();
     double train_ms = std::chrono::duration_cast<std::chrono::microseconds>(
                           train_end - train_start)
@@ -558,7 +614,7 @@ int main(int argc, char *argv[]) {
     int correct = 0;
     auto start = std::chrono::high_resolution_clock::now();
     for (const auto &pt : test_data) {
-      int pred = dt.predict(std::get<0>(pt), std::get<1>(pt));
+      int pred = dt_clf.predict(std::get<0>(pt), std::get<1>(pt));
       if (pred == std::get<2>(pt))
         correct++;
     }
@@ -571,15 +627,17 @@ int main(int argc, char *argv[]) {
     double avg_us = total_us / test_data.size();
     double accuracy = (double)correct / test_data.size();
 
-    static_results.push_back({"C++ Decision Tree", accuracy, avg_us, train_ms});
+    static_results.push_back(
+        {"C++ Decision Tree (adaptive)", accuracy, avg_us, train_ms});
   }
 
   // ============================================
-  // STATIC BENCHMARK 4: Delaunay C++ (Ours)
+  // STATIC 4: Delaunay C++ (Ours)
   // ============================================
   {
     std::cout << "Running Delaunay C++ (Ours)..." << std::endl;
     DelaunayClassifier classifier;
+    classifier.set_output_dir("results");
 
     auto train_start = std::chrono::high_resolution_clock::now();
     classifier.train(train_file, 3);
@@ -616,7 +674,6 @@ int main(int argc, char *argv[]) {
   // ============================================
   std::cout << "\n--- DYNAMIC BENCHMARKS ---" << std::endl;
 
-  // Prepare dynamic stream (10 new points from test data)
   const int NUM_DYNAMIC_OPS = std::min(10, (int)test_data.size());
 
   // Dynamic: Decision Tree (requires full rebuild)
@@ -624,14 +681,14 @@ int main(int argc, char *argv[]) {
     std::cout << "Running C++ Decision Tree (Rebuild)..." << std::endl;
     std::vector<std::tuple<float, float, int>> working_data = train_data;
 
-    DecisionTreeCpp dt(15, 2);
-    dt.fit(working_data);
+    int adaptive_depth = std::min(
+        20, std::max(5, (int)(2.0 * std::log2((double)train_data.size()))));
 
     double total_rebuild_ns = 0;
     for (int i = 0; i < NUM_DYNAMIC_OPS; i++) {
       working_data.push_back(test_data[i]);
 
-      DecisionTreeCpp dt_new(15, 2);
+      DecisionTreeCpp dt_new(adaptive_depth, 2);
       auto start = std::chrono::high_resolution_clock::now();
       dt_new.fit(working_data);
       auto end = std::chrono::high_resolution_clock::now();
@@ -640,22 +697,29 @@ int main(int argc, char *argv[]) {
               .count();
     }
 
-    dynamic_results.push_back({"C++ Decision Tree (Rebuild)",
-                               total_rebuild_ns / NUM_DYNAMIC_OPS,
-                               total_rebuild_ns / NUM_DYNAMIC_OPS,
-                               total_rebuild_ns / NUM_DYNAMIC_OPS});
+    double avg_rebuild = total_rebuild_ns / NUM_DYNAMIC_OPS;
+    dynamic_results.push_back(
+        {"C++ Decision Tree (Rebuild)", avg_rebuild, avg_rebuild, avg_rebuild});
   }
 
-  // Dynamic: Delaunay (O(1) updates)
+  // Dynamic: Delaunay — FIX #10: DIRECTLY measure insert, move, delete
   {
     std::cout << "Running Delaunay C++ (Incremental)..." << std::endl;
 
     DelaunayClassifier classifier;
+    classifier.set_output_dir("results");
     classifier.train(train_file, 3);
 
-    // Measure INSERT times
+    // FIX #10 & #17: Adaptive move offset based on data range
+    double range_x = stats.x_max - stats.x_min;
+    double range_y = stats.y_max - stats.y_min;
+    double move_offset_x = 0.01 * range_x; // 1% of x range
+    double move_offset_y = 0.01 * range_y; // 1% of y range
+
+    // --- Measure INSERT times ---
     double total_insert_ns = 0;
     std::vector<std::tuple<float, float, int>> inserted_points;
+
     for (int i = 0; i < NUM_DYNAMIC_OPS; i++) {
       float x = std::get<0>(test_data[i]);
       float y = std::get<1>(test_data[i]);
@@ -670,11 +734,32 @@ int main(int argc, char *argv[]) {
       inserted_points.push_back({x, y, label});
     }
 
-    // Measure DELETE times (remove the points we just inserted)
+    // --- FIX #10: Measure MOVE times DIRECTLY using move_point() ---
+    // Previously this was approximated as insert + delete time.
+    // Now we call move_point() which implements Algorithm 3.
+    double total_move_ns = 0;
+    std::vector<std::tuple<float, float, int>> moved_points;
+
+    for (int i = 0; i < NUM_DYNAMIC_OPS; i++) {
+      float old_x = std::get<0>(inserted_points[i]);
+      float old_y = std::get<1>(inserted_points[i]);
+      float new_x = old_x + static_cast<float>(move_offset_x);
+      float new_y = old_y + static_cast<float>(move_offset_y);
+
+      auto start = std::chrono::high_resolution_clock::now();
+      classifier.move_point(old_x, old_y, new_x, new_y);
+      auto end = std::chrono::high_resolution_clock::now();
+      total_move_ns +=
+          std::chrono::duration_cast<std::chrono::nanoseconds>(end - start)
+              .count();
+      moved_points.push_back({new_x, new_y, std::get<2>(inserted_points[i])});
+    }
+
+    // --- Measure DELETE times ---
     double total_delete_ns = 0;
     for (int i = NUM_DYNAMIC_OPS - 1; i >= 0; i--) {
-      float x = std::get<0>(inserted_points[i]);
-      float y = std::get<1>(inserted_points[i]);
+      float x = std::get<0>(moved_points[i]);
+      float y = std::get<1>(moved_points[i]);
 
       auto start = std::chrono::high_resolution_clock::now();
       classifier.remove_point(x, y);
@@ -684,10 +769,9 @@ int main(int argc, char *argv[]) {
               .count();
     }
 
-    // Move = Insert + Delete, approximate as sum
     double avg_insert_ns = total_insert_ns / NUM_DYNAMIC_OPS;
+    double avg_move_ns = total_move_ns / NUM_DYNAMIC_OPS;
     double avg_delete_ns = total_delete_ns / NUM_DYNAMIC_OPS;
-    double avg_move_ns = avg_insert_ns + avg_delete_ns;
 
     dynamic_results.push_back({"**Delaunay C++ (O(1) Update)**", avg_insert_ns,
                                avg_move_ns, avg_delete_ns});
@@ -695,14 +779,19 @@ int main(int argc, char *argv[]) {
 
   print_dynamic_results(dynamic_results, dataset_name);
 
-  // Save results to CSV
+  // ============================================
+  // SAVE RESULTS TO CSV
+  // ============================================
   std::string output_file = "results/cpp_benchmark_" + dataset_name + ".csv";
   std::ofstream csv(output_file);
   csv << "method,accuracy,avg_inference_us,train_time_ms,speedup_vs_knn\n";
-  double baseline = static_results[0].avg_inference_us;
+  double baseline =
+      static_results.empty() ? 1.0 : static_results[0].avg_inference_us;
   for (const auto &r : static_results) {
+    double speedup =
+        (r.avg_inference_us > 0) ? baseline / r.avg_inference_us : 0;
     csv << r.method << "," << r.accuracy << "," << r.avg_inference_us << ","
-        << r.train_time_ms << "," << (baseline / r.avg_inference_us) << "\n";
+        << r.train_time_ms << "," << speedup << "\n";
   }
   csv.close();
   std::cout << "\nResults saved to: " << output_file << std::endl;

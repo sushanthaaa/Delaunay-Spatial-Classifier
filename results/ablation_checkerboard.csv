@@ -1,0 +1,11 @@
+variant,accuracy,avg_inference_us,train_ms,notes
+Full Pipeline (Ours),0.97,0.06833,3.72,SRR+Outlier+HalfPlane
+Without SRR Grid,0.97,0.68354,0,No O(1) grid hint
+Without Outlier Removal,0.97,0.160205,3.407,No Phase 1 cleanup
+Nearest Vertex Only (1-NN),0.965,0.5225,0,No half-plane boundary
+2D Buckets Classification,0.965,0.00375,0,O(1) bucket-based path
+Outlier multiplier=1.50,0.975,0,0,797 vertices
+Outlier multiplier=2.00,0.97,0,0,800 vertices
+Outlier multiplier=3.00,0.97,0,0,800 vertices
+Outlier multiplier=5.00,0.97,0,0,800 vertices
+Outlier multiplier=10.0,0.97,0,0,800 vertices

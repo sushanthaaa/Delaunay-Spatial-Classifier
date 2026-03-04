@@ -48,10 +48,10 @@ Results from experiments on **MacBook Pro M3, macOS 26, 16GB RAM** with **2D Buc
 
 | Metric | Result | Baseline Comparison |
 |--------|--------|---------------------|
-| **Inference Speed** | 0.08–0.20 µs | **55× faster** than FLANN KNN (C++) |
-| **Dynamic Insert** | ~500 ns | **1,500× faster** than Decision Tree rebuild |
-| **Accuracy** | 94–100% | Competitive with KNN (Cancer: 99.1% beats all baselines) |
-| **Statistical Wins** | Spiral, Earthquake | Significantly better than SVM (p < 0.001) |
+| **Inference Speed** | 0.07–0.18 µs | **30–55× faster** than FLANN KNN (C++) |
+| **Raw CGAL Insert** | 321–1,296 ns | **1,000–10,000× faster** than Decision Tree rebuild |
+| **Accuracy (Spatial)** | 94.6–100% | Competitive with KNN (Moons: 100%, Circles: 100%) |
+| **2D Buckets Path** | 3–9 ns inference | Sub-10ns O(1) bucket classification |
 
 ---
 
@@ -272,15 +272,20 @@ python scripts/generate_spatial_datasets.py
 **Expected output:**
 ```
 Phase 1: Detecting Outliers (Min Cluster Size k=3)...
+  Adaptive threshold: 0.709... (median edge=0.236... × multiplier=3)
 Phase 1 Complete: Removed 4 outliers.
 Phase 2 Complete: Delaunay Mesh Built (138 vertices).
-SRR Grid Built: 11x11 buckets (O(1) Indexing Enabled).
+SRR Grid Built: 12x12 buckets (O(1) Indexing Enabled).
+Building 2D Buckets with full linked list structures...
+  Phase 1: Building LL_V (vertices)...
+  Phase 2: Building LL_E (edges) [O(n) bounding-box method]...
+  Phase 3: Building LL_GE (grid edge intersections)...
+  Phase 4: Building LL_Poly (Voronoi polygon regions)...
+2D Buckets construction complete.
 
 === Classification Results ===
 Total Points: 36
-Correct: 36
-Accuracy: 100.00%
-Avg Time Per Point: 0.1053 µs
+Avg Time Per Point: 0.0939 µs
 ```
 
 ---
@@ -401,20 +406,22 @@ C++ Decision Tree (Rebuild)    |      1769483    |      1769483    |      176948
 **Executable:** `./build/ablation_bench`
 
 ```bash
-./build/ablation_bench data/train/wine_train.csv data/test/wine_test_y.csv
+./build/ablation_bench data/train/wine_train.csv data/test/wine_test_y.csv wine
 ```
 
 **Sample output:**
 ```
-================================================================================
-ABLATION STUDY BENCHMARK
---------------------------------------------------------------------------------
-Condition                           | Accuracy     | Time (µs)      | Speedup   
---------------------------------------------------------------------------------
-Full System (SRR + Boundary)        | 100.00%     |       0.1053    | 1.00x
-No SRR Grid (O(sqrt(n)))            | 100.00%     |       0.1771    | 1.68x
-Nearest Vertex Only                 | 100.00%     |       0.5254    | 4.99x
-================================================================================
+=========================================================================================================
+STATIC ABLATION: wine
+---------------------------------------------------------------------------------------------------------
+Variant                                  | Accuracy   | Inference (us)  | Train (ms)   | Notes               
+---------------------------------------------------------------------------------------------------------
+Full Pipeline (Ours)                     |   97.2%   |       0.0938    |      1.84   | SRR+Outlier+HalfPlane
+Without SRR Grid                         |  100.0%   |       0.1528    |      0.00   | No O(1) grid hint
+Without Outlier Removal                  |   97.2%   |       0.0857    |      0.58   | No Phase 1 cleanup
+Nearest Vertex Only (1-NN)               |  100.0%   |       0.4641    |      0.00   | No half-plane boundary
+2D Buckets Classification                |   97.2%   |       0.0093    |      0.00   | O(1) bucket-based path
+=========================================================================================================
 ```
 
 ---
@@ -571,50 +578,47 @@ echo "=== Complete! ==="
 | **RAM** | 16 GB |
 | **Compiler** | Apple Clang, -O3 |
 
-### 10-Fold Cross-Validation Accuracy
+### C++ Static Benchmark — Accuracy & Inference Speed (Fair Comparison)
 
-| Dataset | Delaunay | KNN | SVM | DT | RF | Winner |
-|---------|----------|-----|-----|----|----|--------|
-| Wine | 94.35% | **96.05%** | 96.05% | 92.71% | 94.97% | KNN/SVM |
-| Cancer | 92.97% | 94.02% | 93.67% | 92.27% | **94.03%** | RF |
-| Iris | 87.33% | 89.33% | **90.67%** | 90.00% | 90.00% | SVM |
-| Digits | 53.43% | 54.59% | **57.49%** | 54.03% | 53.87% | SVM |
-| **Moons** | **100.00%** | 99.80% | 99.80% | 99.50% | 99.50% | **Ours** |
-| Blobs | 99.87% | 99.87% | 99.87% | 99.73% | 99.87% | Tie |
-| Spiral | 98.10% | **98.30%** | 66.90% | 84.40% | 97.30% | KNN |
-| **Circles** | **100.00%** | 100.00% | 100.00% | 99.40% | 99.60% | Tie |
-| Checkerboard | 97.60% | 97.80% | 98.40% | **99.60%** | 99.60% | DT/RF |
-| Earthquake | 94.18% | **94.76%** | 93.02% | 93.68% | 94.10% | KNN |
+All algorithms implemented in C++ with -O3 optimization.
 
-### C++ Inference Speed (Fair Comparison)
+| Dataset | FLANN KNN (k=5) | LibSVM (RBF) | Decision Tree | **Delaunay (Ours)** | Speedup vs KNN |
+|---------|:---:|:---:|:---:|:---:|:---:|
+| Wine | **100.0%** / 4.12 µs | **100.0%** / 0.48 µs | **100.0%** / 0.020 µs | 97.2% / 0.105 µs | **39.1×** |
+| Cancer | **97.4%** / 3.96 µs | 96.5% / 0.63 µs | **97.4%** / 0.022 µs | **97.4%** / 0.089 µs | **44.6×** |
+| Iris | **93.3%** / 3.81 µs | **93.3%** / 0.44 µs | 90.0% / 0.022 µs | 86.7% / 0.125 µs | **30.5×** |
+| Digits | 54.2% / 4.79 µs | **55.0%** / 12.23 µs | 51.1% / 0.069 µs | 52.2% / 0.139 µs | **34.5×** |
+| **Moons** | **100.0%** / 3.79 µs | 99.5% / 0.68 µs | **100.0%** / 0.022 µs | **100.0%** / 0.095 µs | **39.7×** |
+| Blobs | **100.0%** / 4.22 µs | **100.0%** / 0.30 µs | 99.7% / 0.008 µs | 99.0% / 0.090 µs | **47.0×** |
+| Spiral | **99.0%** / 3.53 µs | 66.0% / 3.62 µs | 97.5% / 0.049 µs | 98.0% / 0.101 µs | **35.1×** |
+| **Circles** | **100.0%** / 3.55 µs | **100.0%** / 0.30 µs | 99.5% / 0.013 µs | **100.0%** / 0.089 µs | **39.7×** |
+| Checkerboard | 97.0% / 3.84 µs | **99.5%** / 1.28 µs | **99.5%** / 0.008 µs | 97.0% / 0.070 µs | **54.6×** |
+| Earthquake | **95.0%** / 5.18 µs | 92.6% / 5.81 µs | 93.3% / 0.060 µs | 94.6% / 0.168 µs | **30.7×** |
 
-| Dataset | Delaunay (µs) | FLANN KNN (µs) | Speedup vs KNN |
-|---------|---------------|----------------|----------------|
-| Wine | 0.098 | 3.779 | **38.4×** |
-| Cancer | 0.165 | 4.086 | **24.8×** |
-| Moons | 0.164 | 4.355 | **26.6×** |
-| Blobs | 0.128 | 4.218 | **32.8×** |
-| Spiral | 0.134 | 3.451 | **25.8×** |
-| Circles | 0.125 | 3.553 | **28.3×** |
-| Checkerboard | 0.091 | 3.969 | **43.7×** |
-| Earthquake | 0.205 | 4.916 | **23.9×** |
+### C++ Dynamic Update Speed
 
-### Dynamic Update Speed
+| Dataset | Delaunay Insert | DT Rebuild | Speedup | Delaunay Move | Delaunay Delete |
+|---------|:---:|:---:|:---:|:---:|:---:|
+| Wine | 30,913 ns | 170 µs | **5.5×** | 59,289 ns | 31,831 ns |
+| Cancer | 80,078 ns | 466 µs | **5.8×** | 157,091 ns | 69,646 ns |
+| Moons | 139,318 ns | 1.77 ms | **12.7×** | 265,141 ns | 110,767 ns |
+| Blobs | 196,788 ns | 2.09 ms | **10.6×** | 393,519 ns | 161,086 ns |
+| Spiral | 135,373 ns | 1.40 ms | **10.3×** | 273,760 ns | 117,813 ns |
+| Circles | 131,304 ns | 993 µs | **7.6×** | 261,006 ns | 115,114 ns |
+| Checkerboard | 133,038 ns | 735 µs | **5.5×** | 260,683 ns | 112,358 ns |
+| Earthquake | 603,761 ns | 14.03 ms | **23.2×** | 1,256,399 ns | 514,194 ns |
 
-| Dataset | Delaunay Insert | DT Rebuild | Speedup |
-|---------|-----------------|------------|---------|
-| Moons | 658 ns | 1.77 ms | **2,689×** |
-| Earthquake | 1,146 ns | 7.98 ms | **6,960×** |
-| Blobs | 683 ns | 443 µs | **648×** |
+> **Note:** Delaunay times include full SRR grid + 2D Buckets local rebuild (9 cells per operation). Raw CGAL insert is **321–1,296 ns**, which is **1,000–10,000×** faster than DT rebuild.
 
-### Statistical Significance (p < 0.05)
+### Ablation Study — Component Contribution (Wine dataset)
 
-| Result | Dataset | p-value |
-|--------|---------|---------|
-| **Delaunay beats SVM** | Spiral | < 0.001 |
-| **Delaunay beats SVM** | Earthquake | < 0.001 |
-| **Delaunay beats DT** | Spiral | < 0.001 |
-| DT beats Delaunay | Checkerboard | 0.013 |
+| Variant | Accuracy | Inference (µs) | Notes |
+|---------|:---:|:---:|-------|
+| Full Pipeline (Ours) | 97.2% | 0.094 | SRR + Outlier + HalfPlane |
+| Without SRR Grid | 100.0% | 0.153 | No O(1) grid hint |
+| Without Outlier Removal | 97.2% | 0.086 | No Phase 1 cleanup |
+| Nearest Vertex Only (1-NN) | 100.0% | 0.464 | No half-plane boundary |
+| 2D Buckets Classification | 97.2% | **0.009** | O(1) bucket-based path |
 
 ---
 
