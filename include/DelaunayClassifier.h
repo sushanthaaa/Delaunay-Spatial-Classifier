@@ -2,35 +2,23 @@
  * @file DelaunayClassifier.h
  * @brief Delaunay Triangulation-based Spatial Classifier with O(1) Inference
  *
- * This classifier uses Delaunay Triangulation for 2D point classification,
- * achieving O(1) expected inference time via the Square Root Rule (SRR) grid.
- * Key innovation: no traditional "training phase" — triangulation IS the model.
+ * This classifier uses Delaunay Triangulation (DT) for 2D point classification.
+ * The DT defines geometric decision boundaries during training; the SRR grid
+ * with 2D Buckets precomputes and caches these boundaries, enabling O(1)
+ * inference without accessing the triangulation at query time.
  *
- * Main Features:
- * - O(1) average classification via SRR spatial indexing
- * - O(1) amortized dynamic updates (insert/delete/move points)
- * - Built-in outlier detection using connected component analysis
- * - Geometric decision boundaries (half-plane tests within triangles)
- * - Full 2D Buckets with per-cell classification metadata
+ * Pipeline:
+ *   Phase 1 — Outlier removal via connected component analysis on DT edges
+ *   Phase 2 — Delaunay Triangulation construction (the model)
+ *   Phase 3 — SRR grid (ceil(sqrt(n)) x ceil(sqrt(n))) with 2D Buckets
+ *   Phase 4 — O(1) classification via precomputed bucket metadata
  *
- * Fixes Applied (IEEE Submission Quality):
- * - #1:  Adaptive outlier threshold (no hardcoded distance)
- * - #2:  SRR stores best face hint per cell (closest centroid to cell center)
- * - #3:  Relative bounding box padding (scale-independent)
- * - #4:  True half-plane decision boundary classification (not 1-NN)
- * - #5:  O(n) edge registration using bounding-box cell enumeration
- * - #6:  All Voronoi polygons stored per class per bucket (not just largest)
- * - #7:  Correct unbounded Voronoi edge direction via perpendicular bisector
- * - #8:  Dynamic updates maintain SRR grid and 2D Buckets locally
- * - #9:  Proper Algorithm 3 movement (same-star check)
- * - #10: Direct move timing in benchmarks
- * - #11: Correct outside-hull classification via extended decision boundary
- * - #13: Index-based arrays for outlier detection (O(1) access, not O(log n))
- * - #14: Direct Vertex_handle map for Voronoi cell lookup
- * - #18: Configurable output directory (no hardcoded path)
+ * Key properties:
+ *   - O(n log n) training (DT construction dominates)
+ *   - O(1) classification via 2D Buckets (no DT access at query time)
+ *   - O(1) amortized dynamic updates (insert/delete/move with local rebuild)
  *
- * @author Research Project — Asia University
- * @see https://www.cgal.org for CGAL Delaunay triangulation documentation
+ * @author Asia University — Computational Geometry Research Lab
  */
 
 #ifndef DELAUNAY_CLASSIFIER_H
@@ -58,7 +46,6 @@ typedef Delaunay::Point Point;
 typedef Delaunay::Vertex_handle Vertex_handle;
 typedef Delaunay::Face_handle Face_handle;
 
-// Voronoi diagram types for exact cell extraction
 typedef CGAL::Delaunay_triangulation_adaptation_traits_2<Delaunay> VD_AT;
 typedef CGAL::Delaunay_triangulation_caching_degeneracy_removal_policy_2<
     Delaunay>
@@ -66,49 +53,15 @@ typedef CGAL::Delaunay_triangulation_caching_degeneracy_removal_policy_2<
 typedef CGAL::Voronoi_diagram_2<Delaunay, VD_AT, VD_AP> VoronoiDiagram;
 
 // =============================================================================
-// SRR Grid (Square Root Rule) — Fixed: best hint per cell, relative padding
+// 2D Buckets — Linked List Data Structures
 // =============================================================================
 
-/**
- * @struct SRR_Grid
- * @brief Square Root Rule spatial index for O(1) triangle lookup.
- *
- * FIX #2: Stores the face whose centroid is closest to the cell center,
- *         ensuring a high-quality hint for point location walks.
- * FIX #3: Uses relative bounding box padding (1% of range) instead of
- *         hardcoded 0.1.
- */
-struct SRR_Grid {
-  int rows, cols;
-  double min_x, max_x, min_y, max_y;
-  double step_x, step_y;
-
-  std::vector<Face_handle> buckets; ///< Best face hint per cell
-
-  SRR_Grid()
-      : rows(0), cols(0), min_x(0), max_x(0), min_y(0), max_y(0), step_x(0),
-        step_y(0) {}
-
-  void clear() {
-    buckets.clear();
-    rows = cols = 0;
-  }
-};
-
-// =============================================================================
-// 2D BUCKETS DATA STRUCTURES — Full Implementation, All 6 Linked Lists
-// =============================================================================
-
-/**
- * @struct LL_Vertex
- * @brief Linked list node for vertices within a bucket (LL_V).
- * FIX #14: Stores Vertex_handle for direct O(1) Voronoi cell lookup.
- */
+/// Linked list node storing a vertex within a bucket (LL_V).
 struct LL_Vertex {
   Point point;
   int class_label;
   int vertex_id;
-  Vertex_handle vh; ///< FIX #14: Direct handle to CGAL vertex
+  Vertex_handle vh; ///< Direct handle to CGAL vertex for Voronoi cell lookup
   LL_Vertex *next;
 
   LL_Vertex() : class_label(-1), vertex_id(-1), vh(), next(nullptr) {}
@@ -116,14 +69,11 @@ struct LL_Vertex {
       : point(p), class_label(label), vertex_id(id), vh(v), next(nullptr) {}
 };
 
-/**
- * @struct LL_Edge
- * @brief Linked list node for edges passing through a bucket (LL_E).
- */
+/// Linked list node storing an edge passing through a bucket (LL_E).
 struct LL_Edge {
   Point p1, p2;
   int class1, class2;
-  bool is_boundary;
+  bool is_boundary; ///< True if endpoint vertices have different classes
   int edge_id;
   LL_Edge *next;
 
@@ -135,10 +85,7 @@ struct LL_Edge {
         edge_id(id), next(nullptr) {}
 };
 
-/**
- * @enum GridEdgeSide
- * @brief Identifies which side of a bucket boundary.
- */
+/// Identifies which side of a bucket boundary a grid edge intersection lies on.
 enum GridEdgeSide {
   GRID_LEFT = 0,
   GRID_BOTTOM = 1,
@@ -146,10 +93,7 @@ enum GridEdgeSide {
   GRID_TOP = 3
 };
 
-/**
- * @struct LL_GridEdge
- * @brief Linked list node for grid edge intersections (LL_GE).
- */
+/// Linked list node for grid edge intersections (LL_GE).
 struct LL_GridEdge {
   GridEdgeSide side;
   Point intersection;
@@ -164,11 +108,7 @@ struct LL_GridEdge {
         next(nullptr) {}
 };
 
-/**
- * @struct LL_Polygon
- * @brief Linked list node for polygon regions (LL_Poly + LL_Label + LL_PolyID).
- * FIX #6: ALL clipped Voronoi polygons are stored, not just the largest.
- */
+/// Linked list node for clipped Voronoi polygon regions (LL_Poly).
 struct LL_Polygon {
   int poly_id;
   int class_label;
@@ -184,14 +124,17 @@ struct LL_Polygon {
         next(nullptr) {}
 };
 
+// =============================================================================
+// Bucket Classification Types
+// =============================================================================
+
 /**
  * @enum BucketType
- * @brief Classification type for fast-path decisions.
+ * @brief Determines the O(1) classification strategy for each bucket.
  *
- * From the advisor's per-cell classification metadata concept:
- * - HOMOGENEOUS:     Single class, O(1) direct return
- * - BIPARTITIONED:   Two classes, O(1) half-plane test
- * - MULTI_PARTITIONED: 3+ classes, O(k) point-in-polygon (k bounded by O(1))
+ * - HOMOGENEOUS:       Single class occupies the entire bucket → direct return
+ * - BIPARTITIONED:     Two classes separated by a line → half-plane dot product
+ * - MULTI_PARTITIONED: Three+ classes → point-in-polygon against Voronoi cells
  */
 enum BucketType {
   BUCKET_HOMOGENEOUS = 0,
@@ -199,63 +142,71 @@ enum BucketType {
   BUCKET_MULTI_PARTITIONED = 2
 };
 
+// =============================================================================
+// Bucket2D — A single cell of the SRR grid
+// =============================================================================
+
 /**
  * @struct Bucket2D
- * @brief Complete 2D Bucket with all 6 linked list data structures.
+ * @brief Contains precomputed classification metadata derived from the
+ *        Delaunay Triangulation's Voronoi dual, clipped to bucket boundaries.
+ *
+ * Stores 6 linked list structures (LL_V, LL_E, LL_GE, LL_Poly, LL_Label,
+ * LL_PolyID) and fast-path classification data. After construction, every
+ * bucket is guaranteed to return a valid class label for any query point
+ * within its bounds — no fallback to the DT is needed.
  */
 struct Bucket2D {
   double min_x, max_x, min_y, max_y;
   int row, col;
 
-  // LL_V: Linked List of Vertices
   LL_Vertex *vertices;
   int vertex_count;
 
-  // LL_E: Linked List of Edges
   LL_Edge *edges;
   int edge_count;
 
-  // LL_GE: Linked List of Grid Edge intersections
   LL_GridEdge *grid_edges;
   int grid_edge_count;
 
-  // LL_Poly + LL_Label + LL_PolyID: Polygon regions
   LL_Polygon *polygons;
   int polygon_count;
 
-  // Classification metadata
   BucketType type;
   int num_classes;
   int dominant_class;
-  Face_handle hint;
 
-  // BIPARTITIONED fast-path: half-plane boundary
-  // The boundary line is defined by normal (nx, ny) and offset d:
-  // A point (x,y) is on the positive side if nx*x + ny*y + d > 0
+  /// BIPARTITIONED fast-path: half-plane boundary (nx*x + ny*y + d = 0)
   double boundary_nx, boundary_ny, boundary_d;
-  int class_positive; ///< Class on the positive side of the half-plane
-  int class_negative; ///< Class on the negative side
+  int class_positive; ///< Class where nx*x + ny*y + d >= 0
+  int class_negative; ///< Class where nx*x + ny*y + d < 0
 
   Bucket2D()
       : min_x(0), max_x(0), min_y(0), max_y(0), row(0), col(0),
         vertices(nullptr), vertex_count(0), edges(nullptr), edge_count(0),
         grid_edges(nullptr), grid_edge_count(0), polygons(nullptr),
         polygon_count(0), type(BUCKET_HOMOGENEOUS), num_classes(0),
-        dominant_class(-1), hint(), boundary_nx(0), boundary_ny(0),
-        boundary_d(0), class_positive(-1), class_negative(-1) {}
+        dominant_class(-1), boundary_nx(0), boundary_ny(0), boundary_d(0),
+        class_positive(-1), class_negative(-1) {}
 
   /**
-   * @brief O(1) classification using bucket type metadata.
+   * @brief Classify a query point using precomputed bucket metadata.
    *
-   * Case A (HOMOGENEOUS):       return dominant_class — O(1)
-   * Case B (BIPARTITIONED):     half-plane test — O(1)
-   * Case C (MULTI_PARTITIONED): point-in-polygon — O(k), k = O(1) bounded
+   * HOMOGENEOUS:       return dominant_class — O(1)
+   * BIPARTITIONED:     half-plane dot product test — O(1)
+   * MULTI_PARTITIONED: point-in-polygon over clipped Voronoi cells — O(k),
+   *                    where k is bounded by a constant under SRR density.
+   *
+   * Always returns a valid class label >= 0 (dominant_class as final fallback
+   * for MULTI_PARTITIONED buckets when floating-point gaps exist).
    */
   int classify_point(double x, double y) const;
 
+  /// Ray-casting point-in-polygon test.
   static bool point_in_polygon(double x, double y,
                                const std::vector<Point> &polygon);
 
+  /// Free all linked list memory.
   void clear();
 
   bool contains(double x, double y) const {
@@ -263,9 +214,17 @@ struct Bucket2D {
   }
 };
 
+// =============================================================================
+// SRR_Grid_2D — The complete Square Root Rule grid
+// =============================================================================
+
 /**
  * @struct SRR_Grid_2D
- * @brief Complete 2D Buckets grid for O(1) dynamic classification.
+ * @brief ceil(sqrt(n)) x ceil(sqrt(n)) grid of Bucket2D cells.
+ *
+ * This is the sole inference structure. After construction from the DT,
+ * all classification queries go through this grid with O(1) bucket lookup
+ * followed by O(1) bucket-level classification. No DT access at query time.
  */
 struct SRR_Grid_2D {
   int rows, cols;
@@ -285,15 +244,15 @@ struct SRR_Grid_2D {
         bipartitioned_buckets(0), total_polygons(0) {}
 
   void clear() {
-    for (auto &bucket : buckets) {
+    for (auto &bucket : buckets)
       bucket.clear();
-    }
     buckets.clear();
     rows = cols = 0;
     single_class_buckets = multi_class_buckets = bipartitioned_buckets =
         total_polygons = 0;
   }
 
+  /// O(1) bucket index from coordinates (clamped to valid range).
   int get_bucket_index(double x, double y) const;
 
   Bucket2D *get_bucket(int row, int col) {
@@ -312,205 +271,134 @@ struct SRR_Grid_2D {
 };
 
 // =============================================================================
-// MAIN CLASSIFIER CLASS
+// DelaunayClassifier — Main Classifier
 // =============================================================================
 
 /**
  * @class DelaunayClassifier
- * @brief Main classifier using Delaunay Triangulation with SRR optimization.
+ * @brief Spatial classifier using Delaunay Triangulation with O(1) inference.
  *
- * All 20 identified issues from code review have been addressed.
+ * The Delaunay Triangulation defines geometric decision boundaries during
+ * training. The SRR grid with 2D Buckets precomputes these boundaries into
+ * a spatial index, enabling O(1) classification without DT access at query
+ * time. Dynamic updates (insert/delete/move) modify the DT and locally
+ * rebuild only the affected buckets.
  */
 class DelaunayClassifier {
 private:
-  Delaunay dt;
-  SRR_Grid srr;
-  SRR_Grid_2D srr_2d;
+  Delaunay dt_;
+  SRR_Grid_2D grid_;
 
-  // Configuration flags
-  bool use_srr_;
   bool use_outlier_removal_;
-
-  // FIX #1: Adaptive outlier connectivity multiplier (default 3.0)
   double connectivity_multiplier_;
-
-  // FIX #18: Configurable output directory
   std::string output_dir_;
 
-  // --- Internal methods ---
+  // --- Training internals (operate on DT, not used at query time) ---
 
-  /**
-   * @brief Classify a point within a triangle using decision boundary logic.
-   *
-   * FIX #4: Uses half-plane test for Case 2 (two classes),
-   * NOT nearest-vertex. This matches Algorithm 4 Phase 2.
-   *
-   * Case 1 (all same class): return that class
-   * Case 2 (two classes): half-plane test against midpoint boundary line
-   * Case 3 (three classes): Voronoi partition within triangle (nearest vertex)
-   */
-  int classify_point_in_face(Face_handle f, Point p);
+  /// Classify a point within a triangle using decision boundary geometry.
+  /// Case 1: all same class → unanimous label.
+  /// Case 2: two classes → half-plane test via cross-class edge midpoints.
+  /// Case 3: three classes → nearest-vertex Voronoi partition within triangle.
+  int classify_point_in_face(Face_handle f, Point p) const;
 
-  /**
-   * @brief Remove outliers using connected component analysis.
-   *
-   * FIX #1:  Uses adaptive distance threshold based on median edge length.
-   * FIX #13: Uses index-based arrays instead of std::map<Point> for O(1)
-   * access.
-   */
+  /// Remove outliers via connected component analysis on same-class DT edges.
   std::vector<std::pair<Point, int>>
   remove_outliers(const std::vector<std::pair<Point, int>> &input_points,
                   int k);
 
-  /**
-   * @brief Compute the median edge length of a Delaunay triangulation.
-   * Used for adaptive outlier threshold (FIX #1).
-   */
+  /// Compute median edge length of a Delaunay triangulation.
   double compute_median_edge_length(const Delaunay &temp_dt);
 
-  // File I/O helpers
+  /// Load CSV with format: x,y,label
   std::vector<std::pair<Point, int>>
   load_labeled_csv(const std::string &filepath);
+
+  /// Load CSV with format: x,y (unlabeled query points)
   std::vector<Point> load_unlabeled_csv(const std::string &filepath);
 
-  /**
-   * @brief Build the SRR spatial index grid.
-   *
-   * FIX #2: Stores the face whose centroid is closest to each cell center.
-   * FIX #3: Uses relative padding (1% of range, minimum 1e-6).
-   */
-  void build_srr_grid();
+  // --- 2D Buckets construction ---
 
-  /**
-   * @brief Get a face hint for point location from the SRR grid.
-   */
-  Face_handle get_srr_hint(const Point &p);
+  /// Build the complete 2D Buckets grid from the current DT.
+  void build_2d_buckets();
 
-  /**
-   * @brief Rebuild a single bucket's linked lists after dynamic update.
-   * FIX #8: Enables local-only bucket maintenance after insert/delete/move.
-   */
+  /// Rebuild a single bucket after a dynamic update.
   void rebuild_bucket(int bucket_idx);
 
-  /**
-   * @brief Update SRR face hint for a single cell.
-   * FIX #8: Maintains hint validity after dynamic operations.
-   */
-  void update_srr_hint(int bucket_idx);
-
-  /**
-   * @brief Update all affected cells around a point after a dynamic operation.
-   * FIX #8: Rebuilds the 3x3 neighborhood of the cell containing (x,y).
-   */
+  /// Rebuild the 3x3 neighborhood of buckets around point (x,y).
   void update_local_cells(double x, double y);
 
-  /**
-   * @brief Compute the closest point on a segment to a query point.
-   * FIX #11: Correct geometry for outside-hull classification.
-   * @return Squared distance from p to closest point on segment (a, b).
-   */
+  /// Post-construction validation: ensure every bucket has dominant_class >= 0.
+  void validate_all_buckets();
+
+  // --- Geometry helpers ---
+
   double squared_distance_point_to_segment(const Point &p, const Point &a,
                                            const Point &b);
 
 public:
   DelaunayClassifier();
+  ~DelaunayClassifier();
 
   // --- Configuration ---
-  void set_use_srr(bool use) { use_srr_ = use; }
   void set_use_outlier_removal(bool use) { use_outlier_removal_ = use; }
   void set_connectivity_multiplier(double m) { connectivity_multiplier_ = m; }
   void set_output_dir(const std::string &dir) { output_dir_ = dir; }
 
   /**
-   * @brief Train the classifier.
-   * @param train_file Path to training CSV (format: x,y,label)
-   * @param outlier_k Minimum cluster size for outlier removal (default: 3)
+   * @brief Train: outlier removal → DT construction → 2D Buckets build.
+   * @param train_file CSV file (x,y,label format, no header).
+   * @param outlier_k  Minimum cluster size for outlier removal (default: 3).
    */
   void train(const std::string &train_file, int outlier_k = 3);
 
+  /**
+   * @brief Classify a single point in O(1) via the 2D Buckets grid.
+   *
+   * This is the sole classification entry point for all queries (static and
+   * after dynamic updates). The bucket index is computed by arithmetic, then
+   * the bucket's precomputed metadata determines the class. No DT access.
+   */
+  int classify(double x, double y) const;
+
+  /// Batch classification with timing benchmark.
   void predict_benchmark(const std::string &test_file,
                          const std::string &output_file);
 
-  void run_dynamic_stress_test(const std::string &stream_file,
-                               const std::string &log_file);
+  // --- Dynamic Updates ---
+
+  /// Insert a new labeled point and locally rebuild affected buckets.
+  void insert_point(double x, double y, int label);
+
+  /// Remove the nearest point to (x,y) and locally rebuild affected buckets.
+  void remove_point(double x, double y);
+
+  /// Move a point: local flips if within same star, else delete + re-insert.
+  void move_point(double old_x, double old_y, double new_x, double new_y);
+
+  // --- Ablation study variants (for benchmarking comparison only) ---
+
+  /// Classify by walking the DT from an arbitrary start face (no grid).
+  int classify_no_grid(double x, double y) const;
+
+  /// Classify by nearest-vertex only (1-NN baseline).
+  int classify_nearest_vertex(double x, double y) const;
+
+  // --- Visualization & stress testing ---
 
   void export_visualization(const std::string &mesh_file,
                             const std::string &boundary_file,
                             const std::string &points_file = "");
-
+  void run_dynamic_stress_test(const std::string &stream_file,
+                               const std::string &log_file);
   void run_dynamic_visualization(const std::string &stream_file,
                                  const std::string &out_dir);
+  std::vector<std::pair<int, std::vector<Point>>> compute_class_regions() const;
 
-  // --- Single-Point Classification ---
-
-  /**
-   * @brief Classify a single point with full SRR optimization.
-   * FIX #4:  Uses half-plane decision boundary, not 1-NN.
-   * FIX #11: Correct outside-hull classification via extended boundary.
-   */
-  int classify_single(double x, double y);
-
-  /**
-   * @brief Classify WITHOUT SRR hint (for ablation study).
-   */
-  int classify_single_no_srr(double x, double y);
-
-  /**
-   * @brief Classify using nearest vertex only (1-NN, for ablation).
-   */
-  int classify_nearest_vertex(double x, double y);
-
-  // --- Dynamic Update Methods ---
-
-  /**
-   * @brief Insert a new labeled training point.
-   * FIX #8: Updates SRR grid and 2D Buckets locally.
-   */
-  void insert_point(double x, double y, int label);
-
-  /**
-   * @brief Remove a point from the model.
-   * FIX #8: Updates SRR grid and 2D Buckets locally.
-   */
-  void remove_point(double x, double y);
-
-  /**
-   * @brief Move a point using Algorithm 3 logic.
-   * FIX #9: Implements proper same-star check.
-   *         Case A: within same star polygon → local flip
-   *         Case B: different polygon → delete + re-insert
-   * FIX #8: Updates SRR grid and 2D Buckets locally.
-   */
-  void move_point(double old_x, double old_y, double new_x, double new_y);
-
-  // --- 2D Buckets Methods ---
-
-  /**
-   * @brief Build the enhanced 2D Buckets grid.
-   *
-   * FIX #5:  O(n) edge registration via bounding-box cell enumeration.
-   * FIX #6:  Stores ALL clipped Voronoi polygons per class per bucket.
-   * FIX #7:  Correct unbounded Voronoi edge direction.
-   * FIX #14: Uses Vertex_handle map for O(1) Voronoi cell lookup.
-   */
-  void build_2d_buckets();
-
-  /**
-   * @brief Classify using 2D Buckets for O(1) dynamic classification.
-   */
-  int classify_single_dynamic(double x, double y);
-
-  /**
-   * @brief Compute decision boundary polygons (Voronoi regions by class).
-   */
-  std::vector<std::pair<int, std::vector<Point>>> compute_class_regions();
-
-  // --- Accessors for benchmarks ---
-  int num_vertices() const { return static_cast<int>(dt.number_of_vertices()); }
-  double get_srr_step_x() const { return srr.step_x; }
-  double get_srr_step_y() const { return srr.step_y; }
-  double get_data_range_x() const { return srr.max_x - srr.min_x; }
-  double get_data_range_y() const { return srr.max_y - srr.min_y; }
+  // --- Accessors ---
+  int num_vertices() const {
+    return static_cast<int>(dt_.number_of_vertices());
+  }
+  const SRR_Grid_2D &grid() const { return grid_; }
 };
 
 #endif // DELAUNAY_CLASSIFIER_H

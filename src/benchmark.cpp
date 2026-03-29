@@ -650,7 +650,7 @@ int main(int argc, char *argv[]) {
     int correct = 0;
     auto start = std::chrono::high_resolution_clock::now();
     for (const auto &pt : test_data) {
-      int pred = classifier.classify_single(std::get<0>(pt), std::get<1>(pt));
+      int pred = classifier.classify(std::get<0>(pt), std::get<1>(pt));
       if (pred == std::get<2>(pt))
         correct++;
     }
@@ -674,7 +674,7 @@ int main(int argc, char *argv[]) {
   // ============================================
   std::cout << "\n--- DYNAMIC BENCHMARKS ---" << std::endl;
 
-  const int NUM_DYNAMIC_OPS = std::min(10, (int)test_data.size());
+  const int NUM_DYNAMIC_OPS = std::min(100, (int)test_data.size());
 
   // Dynamic: Decision Tree (requires full rebuild)
   {

@@ -179,7 +179,6 @@ int main(int argc, char *argv[]) {
     std::cout << "\n[A1] Full Pipeline (SRR + Outlier + Decision Boundary)..."
               << std::endl;
     DelaunayClassifier clf;
-    clf.set_use_srr(true);
     clf.set_use_outlier_removal(true);
     clf.set_output_dir("results");
 
@@ -194,7 +193,7 @@ int main(int argc, char *argv[]) {
     int correct = 0;
     auto start = std::chrono::high_resolution_clock::now();
     for (const auto &pt : test_data) {
-      int pred = clf.classify_single(std::get<0>(pt), std::get<1>(pt));
+      int pred = clf.classify(std::get<0>(pt), std::get<1>(pt));
       if (pred == std::get<2>(pt))
         correct++;
     }
@@ -217,7 +216,6 @@ int main(int argc, char *argv[]) {
   {
     std::cout << "[A2] Without SRR Grid..." << std::endl;
     DelaunayClassifier clf;
-    clf.set_use_srr(true); // Still build for comparison
     clf.set_use_outlier_removal(true);
     clf.set_output_dir("results");
     clf.train(train_file, 3);
@@ -225,8 +223,8 @@ int main(int argc, char *argv[]) {
     int correct = 0;
     auto start = std::chrono::high_resolution_clock::now();
     for (const auto &pt : test_data) {
-      // classify_single_no_srr: locate() without hint
-      int pred = clf.classify_single_no_srr(std::get<0>(pt), std::get<1>(pt));
+      // classify_no_grid: locate() without grid
+      int pred = clf.classify_no_grid(std::get<0>(pt), std::get<1>(pt));
       if (pred == std::get<2>(pt))
         correct++;
     }
@@ -249,7 +247,6 @@ int main(int argc, char *argv[]) {
   {
     std::cout << "[A3] Without Outlier Removal..." << std::endl;
     DelaunayClassifier clf;
-    clf.set_use_srr(true);
     clf.set_use_outlier_removal(false); // Disable outlier removal
     clf.set_output_dir("results");
 
@@ -264,7 +261,7 @@ int main(int argc, char *argv[]) {
     int correct = 0;
     auto start = std::chrono::high_resolution_clock::now();
     for (const auto &pt : test_data) {
-      int pred = clf.classify_single(std::get<0>(pt), std::get<1>(pt));
+      int pred = clf.classify(std::get<0>(pt), std::get<1>(pt));
       if (pred == std::get<2>(pt))
         correct++;
     }
@@ -287,7 +284,6 @@ int main(int argc, char *argv[]) {
   {
     std::cout << "[A4] Nearest Vertex Only (1-NN)..." << std::endl;
     DelaunayClassifier clf;
-    clf.set_use_srr(true);
     clf.set_use_outlier_removal(true);
     clf.set_output_dir("results");
     clf.train(train_file, 3);
@@ -320,7 +316,6 @@ int main(int argc, char *argv[]) {
   {
     std::cout << "[A5] 2D Buckets Dynamic Classification..." << std::endl;
     DelaunayClassifier clf;
-    clf.set_use_srr(true);
     clf.set_use_outlier_removal(true);
     clf.set_output_dir("results");
     clf.train(train_file, 3);
@@ -328,7 +323,7 @@ int main(int argc, char *argv[]) {
     int correct = 0;
     auto start = std::chrono::high_resolution_clock::now();
     for (const auto &pt : test_data) {
-      int pred = clf.classify_single_dynamic(std::get<0>(pt), std::get<1>(pt));
+      int pred = clf.classify(std::get<0>(pt), std::get<1>(pt));
       if (pred == std::get<2>(pt))
         correct++;
     }
@@ -354,7 +349,6 @@ int main(int argc, char *argv[]) {
 
     for (double m : multipliers) {
       DelaunayClassifier clf;
-      clf.set_use_srr(true);
       clf.set_use_outlier_removal(true);
       clf.set_connectivity_multiplier(m);
       clf.set_output_dir("results");
@@ -362,7 +356,7 @@ int main(int argc, char *argv[]) {
 
       int correct = 0;
       for (const auto &pt : test_data) {
-        int pred = clf.classify_single(std::get<0>(pt), std::get<1>(pt));
+        int pred = clf.classify(std::get<0>(pt), std::get<1>(pt));
         if (pred == std::get<2>(pt))
           correct++;
       }
@@ -393,7 +387,6 @@ int main(int argc, char *argv[]) {
   {
     std::cout << "[D1] Full Dynamic (with local index updates)..." << std::endl;
     DelaunayClassifier clf;
-    clf.set_use_srr(true);
     clf.set_use_outlier_removal(true);
     clf.set_output_dir("results");
     clf.train(train_file, 3);
@@ -450,7 +443,6 @@ int main(int argc, char *argv[]) {
   {
     std::cout << "[D2] Dynamic (no SRR maintenance)..." << std::endl;
     DelaunayClassifier clf;
-    clf.set_use_srr(false); // No SRR → no index maintenance cost
     clf.set_use_outlier_removal(true);
     clf.set_output_dir("results");
     clf.train(train_file, 3);

@@ -2,28 +2,8 @@
  * @file DelaunayClassifier.cpp
  * @brief Implementation of the Delaunay Triangulation Classifier.
  *
- * ALL 20 ISSUES FROM CODE REVIEW FIXED:
- *
- * #1:  Adaptive outlier threshold via median edge length
- * #2:  SRR stores best face hint (closest centroid to cell center)
- * #3:  Relative bounding box padding (1% of range)
- * #4:  Half-plane decision boundary classification (not 1-NN)
- * #5:  O(n) edge registration via bounding-box cell enumeration
- * #6:  All Voronoi polygons stored per class per bucket
- * #7:  Correct unbounded Voronoi edge direction
- * #8:  Dynamic updates maintain SRR + 2D Buckets locally
- * #9:  Proper Algorithm 3 movement with same-star check
- * #10: (benchmark.cpp) Direct move timing
- * #11: Correct outside-hull classification via extended boundary
- * #12: (benchmark_cv.py) Not in this file
- * #13: Index-based arrays for outlier detection
- * #14: Vertex_handle map for Voronoi cell lookup
- * #15: (benchmark.cpp) Adaptive SVM parameters
- * #16: (benchmark.cpp) Adaptive DT depth
- * #17: Adaptive dynamic movement offsets
- * #18: Configurable output directory
- * #19: (Python) Not in this file
- * #20: (Threading) Documented as future work
+ * Unified classification through 2D Buckets. All queries go through the
+ * bucket grid — no separate SRR face-hint path.
  */
 
 #include "../include/DelaunayClassifier.h"
@@ -41,12 +21,14 @@
 #include <unordered_set>
 
 // =============================================================================
-// CONSTRUCTOR
+// CONSTRUCTOR / DESTRUCTOR
 // =============================================================================
 
 DelaunayClassifier::DelaunayClassifier()
-    : use_srr_(true), use_outlier_removal_(true), connectivity_multiplier_(3.0),
+    : use_outlier_removal_(true), connectivity_multiplier_(3.0),
       output_dir_("") {}
+
+DelaunayClassifier::~DelaunayClassifier() { grid_.clear(); }
 
 // =============================================================================
 // FILE I/O
@@ -112,170 +94,11 @@ DelaunayClassifier::load_unlabeled_csv(const std::string &filepath) {
 }
 
 // =============================================================================
-// SRR GRID — FIX #2 (best hint), FIX #3 (relative padding)
+// (SRR face-hint grid removed — all classification via 2D Buckets)
 // =============================================================================
 
-void DelaunayClassifier::build_srr_grid() {
-  if (dt.number_of_vertices() == 0)
-    return;
-
-  // --- Step 1: Calculate bounding box ---
-  double min_x = 1e18, max_x = -1e18, min_y = 1e18, max_y = -1e18;
-
-  for (auto v = dt.finite_vertices_begin(); v != dt.finite_vertices_end();
-       ++v) {
-    double x = v->point().x();
-    double y = v->point().y();
-    if (x < min_x)
-      min_x = x;
-    if (x > max_x)
-      max_x = x;
-    if (y < min_y)
-      min_y = y;
-    if (y > max_y)
-      max_y = y;
-  }
-
-  // FIX #3: Relative padding (1% of range, minimum 1e-6)
-  double range_x = max_x - min_x;
-  double range_y = max_y - min_y;
-  double padding_x = std::max(0.01 * range_x, 1e-6);
-  double padding_y = std::max(0.01 * range_y, 1e-6);
-
-  srr.min_x = min_x - padding_x;
-  srr.max_x = max_x + padding_x;
-  srr.min_y = min_y - padding_y;
-  srr.max_y = max_y + padding_y;
-
-  // --- Step 2: Grid dimensions using Square Root Rule ---
-  int n = dt.number_of_vertices();
-  int k = std::max(1, (int)std::ceil(std::sqrt((double)n)));
-  srr.rows = k;
-  srr.cols = k;
-  srr.step_x = (srr.max_x - srr.min_x) / k;
-  srr.step_y = (srr.max_y - srr.min_y) / k;
-
-  // --- Step 3: Initialize with infinite face ---
-  srr.buckets.assign(k * k, dt.infinite_face());
-
-  // FIX #2: Track best face per cell (closest centroid to cell center)
-  std::vector<double> best_dist(k * k, 1e18);
-
-  for (auto f = dt.finite_faces_begin(); f != dt.finite_faces_end(); ++f) {
-    Point centroid = CGAL::centroid(
-        f->vertex(0)->point(), f->vertex(1)->point(), f->vertex(2)->point());
-
-    int c = static_cast<int>((centroid.x() - srr.min_x) / srr.step_x);
-    int r = static_cast<int>((centroid.y() - srr.min_y) / srr.step_y);
-    c = std::max(0, std::min(c, srr.cols - 1));
-    r = std::max(0, std::min(r, srr.rows - 1));
-
-    int index = r * srr.cols + c;
-
-    // Compute distance from centroid to cell center
-    double cell_cx = srr.min_x + (c + 0.5) * srr.step_x;
-    double cell_cy = srr.min_y + (r + 0.5) * srr.step_y;
-    double dx = centroid.x() - cell_cx;
-    double dy = centroid.y() - cell_cy;
-    double dist = dx * dx + dy * dy;
-
-    if (dist < best_dist[index]) {
-      best_dist[index] = dist;
-      srr.buckets[index] = f;
-    }
-  }
-
-  // Fill empty cells with nearest non-empty cell's face (spiral search)
-  for (int idx = 0; idx < k * k; ++idx) {
-    if (dt.is_infinite(srr.buckets[idx])) {
-      // Find nearest non-empty cell
-      int r0 = idx / k, c0 = idx % k;
-      double nearest_dist = 1e18;
-      Face_handle nearest_face = dt.infinite_face();
-
-      for (int radius = 1; radius <= k; ++radius) {
-        bool found = false;
-        for (int dr = -radius; dr <= radius; ++dr) {
-          for (int dc = -radius; dc <= radius; ++dc) {
-            if (std::abs(dr) != radius && std::abs(dc) != radius)
-              continue; // Only check perimeter
-            int nr = r0 + dr, nc = c0 + dc;
-            if (nr < 0 || nr >= k || nc < 0 || nc >= k)
-              continue;
-            int nidx = nr * k + nc;
-            if (!dt.is_infinite(srr.buckets[nidx])) {
-              double d = (double)(dr * dr + dc * dc);
-              if (d < nearest_dist) {
-                nearest_dist = d;
-                nearest_face = srr.buckets[nidx];
-                found = true;
-              }
-            }
-          }
-        }
-        if (found)
-          break;
-      }
-
-      if (!dt.is_infinite(nearest_face)) {
-        srr.buckets[idx] = nearest_face;
-      }
-    }
-  }
-
-  std::cout << "SRR Grid Built: " << k << "x" << k
-            << " buckets (O(1) Indexing Enabled)." << std::endl;
-}
-
-Face_handle DelaunayClassifier::get_srr_hint(const Point &p) {
-  int c = static_cast<int>((p.x() - srr.min_x) / srr.step_x);
-  int r = static_cast<int>((p.y() - srr.min_y) / srr.step_y);
-
-  if (c < 0 || c >= srr.cols || r < 0 || r >= srr.rows) {
-    return dt.infinite_face();
-  }
-
-  return srr.buckets[r * srr.cols + c];
-}
-
 // =============================================================================
-// FIX #8: SRR hint update for a single cell
-// =============================================================================
-
-void DelaunayClassifier::update_srr_hint(int bucket_idx) {
-  if (bucket_idx < 0 || bucket_idx >= (int)srr.buckets.size())
-    return;
-
-  int r = bucket_idx / srr.cols;
-  int c = bucket_idx % srr.cols;
-  double cell_cx = srr.min_x + (c + 0.5) * srr.step_x;
-  double cell_cy = srr.min_y + (r + 0.5) * srr.step_y;
-
-  // Find the face whose centroid is closest to this cell center
-  Point cell_center(cell_cx, cell_cy);
-  Face_handle best = dt.locate(cell_center);
-
-  if (!dt.is_infinite(best)) {
-    srr.buckets[bucket_idx] = best;
-  } else {
-    // Fallback: use nearest vertex's incident face
-    Vertex_handle nv = dt.nearest_vertex(cell_center);
-    if (nv != Vertex_handle()) {
-      auto circ = dt.incident_faces(nv);
-      auto start = circ;
-      do {
-        if (!dt.is_infinite(circ)) {
-          srr.buckets[bucket_idx] = circ;
-          break;
-        }
-        ++circ;
-      } while (circ != start);
-    }
-  }
-}
-
-// =============================================================================
-// FIX #1: Adaptive outlier threshold, FIX #13: Index-based arrays
+// Adaptive outlier threshold with index-based arrays
 // =============================================================================
 
 double DelaunayClassifier::compute_median_edge_length(const Delaunay &temp_dt) {
@@ -312,7 +135,7 @@ std::vector<std::pair<Point, int>> DelaunayClassifier::remove_outliers(
   Delaunay temp_dt;
   temp_dt.insert(input_points.begin(), input_points.end());
 
-  // FIX #1: Adaptive threshold based on median edge length
+  // Adaptive threshold based on median edge length
   double median_len = compute_median_edge_length(temp_dt);
   double threshold = median_len * connectivity_multiplier_;
   double threshold_sq = threshold * threshold;
@@ -321,7 +144,7 @@ std::vector<std::pair<Point, int>> DelaunayClassifier::remove_outliers(
             << " (median edge=" << median_len
             << " × multiplier=" << connectivity_multiplier_ << ")" << std::endl;
 
-  // FIX #13: Index-based data structures for O(1) access
+  // Index-based data structures for O(1) access
   // Map CGAL vertices to indices
   int n_vertices = static_cast<int>(temp_dt.number_of_vertices());
   std::vector<Point> vertex_points(n_vertices);
@@ -406,15 +229,12 @@ std::vector<std::pair<Point, int>> DelaunayClassifier::remove_outliers(
 }
 
 // =============================================================================
-// CLASSIFICATION LOGIC — FIX #4: Half-plane decision boundary
+// CLASSIFICATION LOGIC — Half-plane decision boundary
 // =============================================================================
 
 /**
  * @brief Classify query point within a triangle using geometric decision
  * boundaries.
- *
- * FIX #4: This now implements the ACTUAL decision boundary from Algorithm 4
- * Phase 2, NOT nearest-vertex (which was 1-NN).
  *
  * Case 1 (all same class): return unanimous label
  * Case 2 (two distinct classes): half-plane test against the line connecting
@@ -423,7 +243,7 @@ std::vector<std::pair<Point, int>> DelaunayClassifier::remove_outliers(
  *         (nearest vertex IS correct here — the Y-shaped boundary from centroid
  *          to midpoints creates exactly the same regions as nearest-vertex)
  */
-int DelaunayClassifier::classify_point_in_face(Face_handle f, Point p) {
+int DelaunayClassifier::classify_point_in_face(Face_handle f, Point p) const {
   int l0 = f->vertex(0)->info();
   int l1 = f->vertex(1)->info();
   int l2 = f->vertex(2)->info();
@@ -543,7 +363,7 @@ int DelaunayClassifier::classify_point_in_face(Face_handle f, Point p) {
 }
 
 // =============================================================================
-// FIX #11: Correct point-to-segment distance for outside-hull classification
+// Point-to-segment distance for outside-hull classification
 // =============================================================================
 
 double DelaunayClassifier::squared_distance_point_to_segment(const Point &p,
@@ -583,7 +403,7 @@ void DelaunayClassifier::train(const std::string &train_file, int outlier_k) {
     clean_points = raw_points;
   }
 
-  // FIX #18: Configurable output directory
+  // Export clean points if output directory is set
   if (!output_dir_.empty()) {
     std::ofstream out(output_dir_ + "/clean_points.csv");
     for (const auto &p : clean_points) {
@@ -593,17 +413,14 @@ void DelaunayClassifier::train(const std::string &train_file, int outlier_k) {
   }
 
   // Build Delaunay triangulation — O(n log n)
-  dt.clear();
-  dt.insert(clean_points.begin(), clean_points.end());
+  dt_.clear();
+  dt_.insert(clean_points.begin(), clean_points.end());
   std::cout << "Phase 2 Complete: Delaunay Mesh Built ("
-            << dt.number_of_vertices() << " vertices)." << std::endl;
+            << dt_.number_of_vertices() << " vertices)." << std::endl;
 
-  // Build SRR grid for O(1) inference
-  if (use_srr_) {
-    build_srr_grid();
-    // Build 2D Buckets
-    build_2d_buckets();
-  }
+  // Build 2D Buckets grid and validate
+  build_2d_buckets();
+  validate_all_buckets();
 }
 
 // =============================================================================
@@ -612,8 +429,36 @@ void DelaunayClassifier::train(const std::string &train_file, int outlier_k) {
 
 void DelaunayClassifier::predict_benchmark(const std::string &test_file,
                                            const std::string &output_file) {
-  auto test_points = load_unlabeled_csv(test_file);
-  std::cout << "Starting Benchmark (with SRR Optimization)..." << std::endl;
+  // Auto-detect format: peek at first line to count columns
+  std::ifstream peek_file(test_file);
+  std::string first_line;
+  std::getline(peek_file, first_line);
+  peek_file.close();
+
+  int num_commas = 0;
+  for (char c : first_line) {
+    if (c == ',')
+      num_commas++;
+  }
+  bool has_labels = (num_commas >= 2); // x,y,label = 2 commas
+
+  // Load data
+  std::vector<Point> test_points;
+  std::vector<int> true_labels;
+
+  if (has_labels) {
+    auto labeled = load_labeled_csv(test_file);
+    test_points.reserve(labeled.size());
+    true_labels.reserve(labeled.size());
+    for (const auto &p : labeled) {
+      test_points.push_back(p.first);
+      true_labels.push_back(p.second);
+    }
+  } else {
+    test_points = load_unlabeled_csv(test_file);
+  }
+
+  std::cout << "Starting Benchmark (2D Buckets Classification)..." << std::endl;
 
   std::vector<int> results;
   results.reserve(test_points.size());
@@ -621,7 +466,7 @@ void DelaunayClassifier::predict_benchmark(const std::string &test_file,
   auto start = std::chrono::high_resolution_clock::now();
 
   for (const auto &p : test_points) {
-    int pred = classify_single(p.x(), p.y());
+    int pred = classify(p.x(), p.y());
     results.push_back(pred);
   }
 
@@ -633,13 +478,23 @@ void DelaunayClassifier::predict_benchmark(const std::string &test_file,
                         ? 0.0
                         : duration_us.count() / (double)test_points.size();
 
-  // Compute accuracy if test file has labels
-  int correct = 0;
   int total = static_cast<int>(results.size());
 
   std::cout << "\n=== Classification Results ===" << std::endl;
   std::cout << "Total Points: " << total << std::endl;
   std::cout << "Avg Time Per Point:   " << avg_time << " us" << std::endl;
+
+  if (has_labels && !true_labels.empty()) {
+    int correct = 0;
+    for (int i = 0; i < total; ++i) {
+      if (results[i] == true_labels[i])
+        correct++;
+    }
+    double accuracy = (double)correct / total * 100.0;
+    std::cout << "Accuracy:             " << accuracy << "% (" << correct
+              << "/" << total << ")" << std::endl;
+  }
+
   std::cout << "================================================" << std::endl;
 
   // Save predictions
@@ -650,214 +505,124 @@ void DelaunayClassifier::predict_benchmark(const std::string &test_file,
 }
 
 // =============================================================================
-// SINGLE-POINT CLASSIFICATION — FIX #4, FIX #11
-// =============================================================================
-
-int DelaunayClassifier::classify_single(double x, double y) {
-  Point p(x, y);
-
-  // O(1) SRR grid lookup
-  Face_handle hint = use_srr_ ? get_srr_hint(p) : dt.infinite_face();
-
-  // Locate with hint
-  Face_handle f = dt.locate(p, hint);
-
-  if (!dt.is_infinite(f)) {
-    return classify_point_in_face(f, p);
-  }
-
-  // =================================================================
-  // OUTSIDE CONVEX HULL — FIX #11: Correct extended boundary logic
-  // =================================================================
-  // Find the nearest hull edge using proper point-to-segment distance,
-  // then classify using the extended decision boundary (perpendicular
-  // bisector of the hull edge, extended outward).
-
-  Face_handle boundary_triangle;
-  int best_edge_index = -1;
-  double min_dist = 1e18;
-  Vertex_handle hull_v1, hull_v2;
-
-  // The infinite face f has one or two finite neighbors that are on the hull
-  for (int i = 0; i < 3; i++) {
-    Face_handle neighbor = f->neighbor(i);
-    if (dt.is_infinite(neighbor))
-      continue;
-
-    // Get the two vertices of the edge shared between f and neighbor
-    // In face f, the edge opposite to vertex i connects vertices (i+1)%3 and
-    // (i+2)%3
-    Vertex_handle v1 = f->vertex((i + 1) % 3);
-    Vertex_handle v2 = f->vertex((i + 2) % 3);
-
-    if (dt.is_infinite(v1) || dt.is_infinite(v2))
-      continue;
-
-    // FIX #11: Correct point-to-segment distance (not midpoint distance)
-    double dist =
-        squared_distance_point_to_segment(p, v1->point(), v2->point());
-
-    if (dist < min_dist) {
-      min_dist = dist;
-      boundary_triangle = neighbor;
-      best_edge_index = i;
-      hull_v1 = v1;
-      hull_v2 = v2;
-    }
-  }
-
-  if (hull_v1 != Vertex_handle() && hull_v2 != Vertex_handle()) {
-    int label1 = hull_v1->info();
-    int label2 = hull_v2->info();
-
-    // If both hull vertices share the same class, the outside region
-    // belongs entirely to that class
-    if (label1 == label2) {
-      return label1;
-    }
-
-    // FIX #11: Use perpendicular bisector of the hull edge to classify.
-    // The decision boundary extends as the perpendicular bisector of
-    // the edge, passing through the midpoint.
-    Point e_p1 = hull_v1->point();
-    Point e_p2 = hull_v2->point();
-
-    double edge_mx = (e_p1.x() + e_p2.x()) / 2.0;
-    double edge_my = (e_p1.y() + e_p2.y()) / 2.0;
-
-    // Edge direction and its perpendicular (the bisector direction)
-    double edge_dx = e_p2.x() - e_p1.x();
-    double edge_dy = e_p2.y() - e_p1.y();
-
-    // The perpendicular bisector at midpoint: normal = (-edge_dy, edge_dx)
-    // A point is on v1's side if:
-    //   (-edge_dy) * (px - mx) + (edge_dx) * (py - my) has same sign as
-    //   (-edge_dy) * (v1x - mx) + (edge_dx) * (v1y - my)
-    double normal_x = -edge_dy;
-    double normal_y = edge_dx;
-
-    double dot_query =
-        normal_x * (p.x() - edge_mx) + normal_y * (p.y() - edge_my);
-    double dot_v1 =
-        normal_x * (e_p1.x() - edge_mx) + normal_y * (e_p1.y() - edge_my);
-
-    if ((dot_query > 0) == (dot_v1 > 0)) {
-      return label1;
-    } else {
-      return label2;
-    }
-  }
-
-  // Ultimate fallback: nearest vertex
-  Vertex_handle v = dt.nearest_vertex(p);
-  return v->info();
-}
-
-int DelaunayClassifier::classify_single_no_srr(double x, double y) {
-  Point p(x, y);
-  Face_handle f = dt.locate(p);
-
-  if (dt.is_infinite(f)) {
-    Vertex_handle v = dt.nearest_vertex(p);
-    return v->info();
-  }
-
-  return classify_point_in_face(f, p);
-}
-
-int DelaunayClassifier::classify_nearest_vertex(double x, double y) {
-  Point p(x, y);
-  Vertex_handle v = dt.nearest_vertex(p);
-  return v->info();
-}
-
-// =============================================================================
-// DYNAMIC OPERATIONS — FIX #8, FIX #9
+// UNIFIED CLASSIFICATION — 2D Buckets only
 // =============================================================================
 
 /**
- * FIX #8: Update local cells (3×3 neighborhood) after a point change.
+ * @brief Classify a single query point via 2D Buckets (O(1) expected).
+ *
+ * Two lines of actual logic:
+ * 1. Compute bucket index by arithmetic (O(1))
+ * 2. Call bucket's classify_point() which handles HOMO/BI/MULTI
+ *
+ * No fallback needed because validate_all_buckets() guarantees every bucket
+ * returns a valid class label.
+ */
+int DelaunayClassifier::classify(double x, double y) const {
+  if (grid_.buckets.empty()) {
+    // Model not trained yet — return nearest vertex as safety
+    Vertex_handle v = dt_.nearest_vertex(Point(x, y));
+    return (v != Vertex_handle()) ? v->info() : -1;
+  }
+
+  int bucket_idx = grid_.get_bucket_index(x, y);
+  return grid_.buckets[bucket_idx].classify_point(x, y);
+}
+
+/**
+ * @brief Classify WITHOUT the 2D Buckets grid (for ablation study A2).
+ * Uses raw DT locate + face-based decision boundary.
+ */
+int DelaunayClassifier::classify_no_grid(double x, double y) const {
+  Point p(x, y);
+  Face_handle f = dt_.locate(p);
+  if (!dt_.is_infinite(f)) {
+    return classify_point_in_face(f, p);
+  }
+  Vertex_handle v = dt_.nearest_vertex(p);
+  return v->info();
+}
+
+/**
+ * @brief Nearest-vertex classification only (1-NN, for ablation study A4).
+ */
+int DelaunayClassifier::classify_nearest_vertex(double x, double y) const {
+  Point p(x, y);
+  Vertex_handle v = dt_.nearest_vertex(p);
+  return v->info();
+}
+
+// =============================================================================
+// DYNAMIC OPERATIONS
+// =============================================================================
+
+/**
+ * @brief Update local cells (3×3 neighborhood) after a point change.
  */
 void DelaunayClassifier::update_local_cells(double x, double y) {
-  if (srr.rows == 0 || srr.cols == 0)
+  if (grid_.rows == 0 || grid_.cols == 0)
     return;
 
-  int c = static_cast<int>((x - srr.min_x) / srr.step_x);
-  int r = static_cast<int>((y - srr.min_y) / srr.step_y);
-  c = std::max(0, std::min(c, srr.cols - 1));
-  r = std::max(0, std::min(r, srr.rows - 1));
+  int c = static_cast<int>((x - grid_.min_x) / grid_.step_x);
+  int r = static_cast<int>((y - grid_.min_y) / grid_.step_y);
+  c = std::max(0, std::min(c, grid_.cols - 1));
+  r = std::max(0, std::min(r, grid_.rows - 1));
 
   for (int dr = -1; dr <= 1; ++dr) {
     for (int dc = -1; dc <= 1; ++dc) {
       int nr = r + dr, nc = c + dc;
-      if (nr >= 0 && nr < srr.rows && nc >= 0 && nc < srr.cols) {
-        int idx = nr * srr.cols + nc;
-        update_srr_hint(idx);
-        if (idx < static_cast<int>(srr_2d.buckets.size())) {
-          rebuild_bucket(idx);
-        }
+      if (nr >= 0 && nr < grid_.rows && nc >= 0 && nc < grid_.cols) {
+        int idx = nr * grid_.cols + nc;
+        rebuild_bucket(idx);
       }
     }
   }
 }
 
-/**
- * FIX #8: Insert with local SRR + bucket maintenance.
- */
 void DelaunayClassifier::insert_point(double x, double y, int label) {
   Point p(x, y);
-  Vertex_handle v = dt.insert(p);
+  Vertex_handle v = dt_.insert(p);
   v->info() = label;
-
-  // Maintain local index
-  if (use_srr_ && srr.rows > 0) {
-    update_local_cells(x, y);
-  }
+  update_local_cells(x, y);
 }
 
-/**
- * FIX #8: Remove with local SRR + bucket maintenance.
- */
 void DelaunayClassifier::remove_point(double x, double y) {
   Point p(x, y);
-  Vertex_handle v = dt.nearest_vertex(p);
+  Vertex_handle v = dt_.nearest_vertex(p);
   if (v != Vertex_handle()) {
     double vx = v->point().x();
     double vy = v->point().y();
-    dt.remove(v);
-
-    if (use_srr_ && srr.rows > 0) {
-      update_local_cells(vx, vy);
-    }
+    dt_.remove(v);
+    update_local_cells(vx, vy);
   }
 }
 
 /**
- * FIX #9: Proper Algorithm 3 movement with same-star check.
+ * @brief Algorithm 3: Move a point with same-star polygon check.
+ * Case A: New position within same star polygon → local flip via move_if_no_collision
+ * Case B: Different polygon → delete + re-insert
  */
 void DelaunayClassifier::move_point(double old_x, double old_y, double new_x,
                                     double new_y) {
   Point old_p(old_x, old_y);
   Point new_p(new_x, new_y);
 
-  // Find the vertex to move
-  Vertex_handle v = dt.nearest_vertex(old_p);
+  Vertex_handle v = dt_.nearest_vertex(old_p);
   if (v == Vertex_handle())
     return;
 
   int label = v->info();
 
-  // Algorithm 3: Check if new position is within the same star polygon
-  // (i.e., within one of the faces incident to v)
+  // Check if new position is within the same star polygon
   bool same_star = false;
-  Face_handle f_new = dt.locate(new_p);
+  Face_handle f_new = dt_.locate(new_p);
 
-  if (!dt.is_infinite(f_new)) {
-    auto circ = dt.incident_faces(v);
+  if (!dt_.is_infinite(f_new)) {
+    auto circ = dt_.incident_faces(v);
     auto start_circ = circ;
     if (circ != Face_handle()) {
       do {
-        if (!dt.is_infinite(circ) && circ == f_new) {
+        if (!dt_.is_infinite(circ) && circ == f_new) {
           same_star = true;
           break;
         }
@@ -868,32 +633,27 @@ void DelaunayClassifier::move_point(double old_x, double old_y, double new_x,
 
   if (same_star) {
     // CASE A: Short movement within same star polygon
-    // Try move_if_no_collision (handles local flips internally)
-    Vertex_handle moved = dt.move_if_no_collision(v, new_p);
+    Vertex_handle moved = dt_.move_if_no_collision(v, new_p);
     if (moved != v) {
       // Collision: fall back to delete + re-insert
-      dt.remove(v);
-      Vertex_handle v_new = dt.insert(new_p);
+      dt_.remove(v);
+      Vertex_handle v_new = dt_.insert(new_p);
       v_new->info() = label;
     }
-    // moved == v means move succeeded with v still being the same handle
   } else {
     // CASE B: Long movement to different polygon
-    // Delete old vertex, insert at new position
-    dt.remove(v);
-    Vertex_handle v_new = dt.insert(new_p);
+    dt_.remove(v);
+    Vertex_handle v_new = dt_.insert(new_p);
     v_new->info() = label;
   }
 
   // Update affected cells for both old and new positions
-  if (use_srr_ && srr.rows > 0) {
-    update_local_cells(old_x, old_y);
-    update_local_cells(new_x, new_y);
-  }
+  update_local_cells(old_x, old_y);
+  update_local_cells(new_x, new_y);
 }
 
 // =============================================================================
-// DYNAMIC STRESS TEST — FIX #9, FIX #17 (adaptive offsets)
+// DYNAMIC STRESS TEST
 // =============================================================================
 
 void DelaunayClassifier::run_dynamic_stress_test(const std::string &stream_file,
@@ -904,13 +664,13 @@ void DelaunayClassifier::run_dynamic_stress_test(const std::string &stream_file,
 
   std::cout << "Running Dynamic Algorithms 1, 2, 3 Stress Test..." << std::endl;
 
-  // FIX #17: Adaptive movement offset based on data range
-  double range_x = srr.max_x - srr.min_x;
-  double range_y = srr.max_y - srr.min_y;
+  // Adaptive movement offset based on data range
+  double range_x = grid_.max_x - grid_.min_x;
+  double range_y = grid_.max_y - grid_.min_y;
   double move_offset =
       0.01 * std::min(range_x, range_y); // 1% of smaller dimension
 
-  Vertex_handle hint_vertex = dt.finite_vertices_begin();
+  Vertex_handle hint_vertex = dt_.finite_vertices_begin();
   std::vector<std::pair<double, double>> inserted_coords;
 
   // --- INSERTION PHASE ---
@@ -930,7 +690,7 @@ void DelaunayClassifier::run_dynamic_stress_test(const std::string &stream_file,
         << "\n";
   }
 
-  // --- MOVEMENT PHASE (FIX #9: uses Algorithm 3) ---
+  // --- MOVEMENT PHASE ---
   for (auto &coord : inserted_coords) {
     double old_x = coord.first;
     double old_y = coord.second;
@@ -978,15 +738,15 @@ void DelaunayClassifier::export_visualization(const std::string &mesh_file,
                                               const std::string &boundary_file,
                                               const std::string &points_file) {
   std::ofstream triFile(mesh_file);
-  for (auto e = dt.finite_edges_begin(); e != dt.finite_edges_end(); ++e) {
-    auto s = dt.segment(e);
+  for (auto e = dt_.finite_edges_begin(); e != dt_.finite_edges_end(); ++e) {
+    auto s = dt_.segment(e);
     triFile << s.source().x() << "," << s.source().y() << "," << s.target().x()
             << "," << s.target().y() << "\n";
   }
   triFile.close();
 
   std::ofstream boundFile(boundary_file);
-  for (auto f = dt.finite_faces_begin(); f != dt.finite_faces_end(); ++f) {
+  for (auto f = dt_.finite_faces_begin(); f != dt_.finite_faces_end(); ++f) {
     auto v0 = f->vertex(0);
     auto v1 = f->vertex(1);
     auto v2 = f->vertex(2);
@@ -1025,7 +785,7 @@ void DelaunayClassifier::export_visualization(const std::string &mesh_file,
 
   if (!points_file.empty()) {
     std::ofstream pFile(points_file);
-    for (auto v = dt.finite_vertices_begin(); v != dt.finite_vertices_end();
+    for (auto v = dt_.finite_vertices_begin(); v != dt_.finite_vertices_end();
          ++v) {
       pFile << v->point().x() << "," << v->point().y() << "," << v->info()
             << "\n";
@@ -1041,9 +801,9 @@ void DelaunayClassifier::run_dynamic_visualization(
 
   std::cout << "Generating Dynamic Visualization Snapshots..." << std::endl;
 
-  // FIX #17: Adaptive offset
-  double range_x = srr.max_x - srr.min_x;
-  double range_y = srr.max_y - srr.min_y;
+  // Adaptive offset
+  double range_x = grid_.max_x - grid_.min_x;
+  double range_y = grid_.max_y - grid_.min_y;
   double move_offset = 0.01 * std::min(range_x, range_y);
 
   // 1. INSERTION
@@ -1079,7 +839,7 @@ void DelaunayClassifier::run_dynamic_visualization(
 }
 
 // =============================================================================
-// 2D BUCKETS IMPLEMENTATION — FIX #5, #6, #7, #14
+// 2D BUCKETS IMPLEMENTATION
 // =============================================================================
 
 bool Bucket2D::point_in_polygon(double x, double y,
@@ -1321,19 +1081,19 @@ static double compute_polygon_area(const std::vector<Point> &poly) {
 }
 
 // =============================================================================
-// FIX #8: Rebuild a single bucket's linked lists
+// Rebuild a single bucket's linked lists
 // =============================================================================
 
 void DelaunayClassifier::rebuild_bucket(int bucket_idx) {
-  if (bucket_idx < 0 || bucket_idx >= static_cast<int>(srr_2d.buckets.size()))
+  if (bucket_idx < 0 || bucket_idx >= static_cast<int>(grid_.buckets.size()))
     return;
 
-  Bucket2D &bucket = srr_2d.buckets[bucket_idx];
+  Bucket2D &bucket = grid_.buckets[bucket_idx];
   bucket.clear();
 
   // Rebuild LL_V: find all vertices within this cell
   int vid = 0;
-  for (auto v = dt.finite_vertices_begin(); v != dt.finite_vertices_end();
+  for (auto v = dt_.finite_vertices_begin(); v != dt_.finite_vertices_end();
        ++v) {
     double vx = v->point().x();
     double vy = v->point().y();
@@ -1349,7 +1109,7 @@ void DelaunayClassifier::rebuild_bucket(int bucket_idx) {
 
   // Rebuild LL_E: find edges intersecting this cell
   int eid = 0;
-  for (auto e = dt.finite_edges_begin(); e != dt.finite_edges_end(); ++e) {
+  for (auto e = dt_.finite_edges_begin(); e != dt_.finite_edges_end(); ++e) {
     auto v1 = e->first->vertex((e->second + 1) % 3);
     auto v2 = e->first->vertex((e->second + 2) % 3);
     Point ep1 = v1->point(), ep2 = v2->point();
@@ -1389,7 +1149,7 @@ void DelaunayClassifier::rebuild_bucket(int bucket_idx) {
   if (classes.empty()) {
     double cx = (bucket.min_x + bucket.max_x) / 2;
     double cy = (bucket.min_y + bucket.max_y) / 2;
-    Vertex_handle nv = dt.nearest_vertex(Point(cx, cy));
+    Vertex_handle nv = dt_.nearest_vertex(Point(cx, cy));
     if (nv != Vertex_handle()) {
       classes.insert(nv->info());
     }
@@ -1465,65 +1225,80 @@ void DelaunayClassifier::rebuild_bucket(int bucket_idx) {
 }
 
 // =============================================================================
-// BUILD 2D BUCKETS — FIX #5, #6, #7, #14
+// BUILD 2D BUCKETS
 // =============================================================================
 
 void DelaunayClassifier::build_2d_buckets() {
-  if (dt.number_of_vertices() == 0)
+  if (dt_.number_of_vertices() == 0)
     return;
 
   std::cout << "Building 2D Buckets with full linked list structures..."
             << std::endl;
 
-  // Initialize grid
-  srr_2d.min_x = srr.min_x;
-  srr_2d.max_x = srr.max_x;
-  srr_2d.min_y = srr.min_y;
-  srr_2d.max_y = srr.max_y;
-  srr_2d.rows = srr.rows;
-  srr_2d.cols = srr.cols;
-  srr_2d.step_x = srr.step_x;
-  srr_2d.step_y = srr.step_y;
-  srr_2d.single_class_buckets = 0;
-  srr_2d.multi_class_buckets = 0;
-  srr_2d.bipartitioned_buckets = 0;
-  srr_2d.total_polygons = 0;
+  int n = static_cast<int>(dt_.number_of_vertices());
+  int k = std::max(2, static_cast<int>(std::ceil(std::sqrt(n))));
 
-  int k = srr.rows;
-  srr_2d.buckets.resize(k * k);
+  // Compute bounding box with relative padding
+  double data_min_x = 1e18, data_max_x = -1e18;
+  double data_min_y = 1e18, data_max_y = -1e18;
+  for (auto v = dt_.finite_vertices_begin(); v != dt_.finite_vertices_end(); ++v) {
+    double vx = v->point().x(), vy = v->point().y();
+    data_min_x = std::min(data_min_x, vx);
+    data_max_x = std::max(data_max_x, vx);
+    data_min_y = std::min(data_min_y, vy);
+    data_max_y = std::max(data_max_y, vy);
+  }
+
+  double range_x = data_max_x - data_min_x;
+  double range_y = data_max_y - data_min_y;
+  double pad_x = std::max(range_x * 0.01, 1e-6);
+  double pad_y = std::max(range_y * 0.01, 1e-6);
+
+  grid_.clear();
+  grid_.rows = k;
+  grid_.cols = k;
+  grid_.min_x = data_min_x - pad_x;
+  grid_.max_x = data_max_x + pad_x;
+  grid_.min_y = data_min_y - pad_y;
+  grid_.max_y = data_max_y + pad_y;
+  grid_.step_x = (grid_.max_x - grid_.min_x) / k;
+  grid_.step_y = (grid_.max_y - grid_.min_y) / k;
+  grid_.single_class_buckets = 0;
+  grid_.multi_class_buckets = 0;
+  grid_.bipartitioned_buckets = 0;
+  grid_.total_polygons = 0;
+
+  grid_.buckets.resize(k * k);
 
   // Initialize bucket boundaries
   for (int r = 0; r < k; ++r) {
     for (int c = 0; c < k; ++c) {
       int idx = r * k + c;
-      Bucket2D &bucket = srr_2d.buckets[idx];
+      Bucket2D &bucket = grid_.buckets[idx];
       bucket.row = r;
       bucket.col = c;
-      bucket.min_x = srr_2d.min_x + c * srr_2d.step_x;
-      bucket.max_x = bucket.min_x + srr_2d.step_x;
-      bucket.min_y = srr_2d.min_y + r * srr_2d.step_y;
-      bucket.max_y = bucket.min_y + srr_2d.step_y;
-      if (idx < static_cast<int>(srr.buckets.size())) {
-        bucket.hint = srr.buckets[idx];
-      }
+      bucket.min_x = grid_.min_x + c * grid_.step_x;
+      bucket.max_x = bucket.min_x + grid_.step_x;
+      bucket.min_y = grid_.min_y + r * grid_.step_y;
+      bucket.max_y = bucket.min_y + grid_.step_y;
     }
   }
 
   // =========================================================================
-  // PHASE 1: Build LL_V (Vertices) — FIX #14: store Vertex_handle
+  // PHASE 1: Build LL_V (Vertices)
   // =========================================================================
   std::cout << "  Phase 1: Building LL_V (vertices)..." << std::endl;
   int vertex_id = 0;
 
-  for (auto v = dt.finite_vertices_begin(); v != dt.finite_vertices_end();
+  for (auto v = dt_.finite_vertices_begin(); v != dt_.finite_vertices_end();
        ++v) {
     Point p = v->point();
     int label = v->info();
 
-    int bucket_idx = srr_2d.get_bucket_index(p.x(), p.y());
-    Bucket2D &bucket = srr_2d.buckets[bucket_idx];
+    int bucket_idx = grid_.get_bucket_index(p.x(), p.y());
+    Bucket2D &bucket = grid_.buckets[bucket_idx];
 
-    // FIX #14: Store Vertex_handle for direct Voronoi cell lookup
+    // Store Vertex_handle for direct Voronoi cell lookup
     LL_Vertex *new_vertex = new LL_Vertex(p, label, vertex_id, v);
     new_vertex->next = bucket.vertices;
     bucket.vertices = new_vertex;
@@ -1533,13 +1308,13 @@ void DelaunayClassifier::build_2d_buckets() {
   }
 
   // =========================================================================
-  // PHASE 2: Build LL_E (Edges) — FIX #5: O(n) via bounding-box enumeration
+  // PHASE 2: Build LL_E (Edges) — O(n) via bounding-box enumeration
   // =========================================================================
   std::cout << "  Phase 2: Building LL_E (edges) [O(n) bounding-box method]..."
             << std::endl;
   int edge_id = 0;
 
-  for (auto e = dt.finite_edges_begin(); e != dt.finite_edges_end(); ++e) {
+  for (auto e = dt_.finite_edges_begin(); e != dt_.finite_edges_end(); ++e) {
     auto v1 = e->first->vertex((e->second + 1) % 3);
     auto v2 = e->first->vertex((e->second + 2) % 3);
 
@@ -1548,23 +1323,23 @@ void DelaunayClassifier::build_2d_buckets() {
     int class1 = v1->info();
     int class2 = v2->info();
 
-    // FIX #5: Compute bounding box of edge, only check overlapping cells
+    // Compute bounding box of edge, only check overlapping cells
     double ex_min = std::min(p1.x(), p2.x());
     double ex_max = std::max(p1.x(), p2.x());
     double ey_min = std::min(p1.y(), p2.y());
     double ey_max = std::max(p1.y(), p2.y());
 
-    int col_start = std::max(0, (int)((ex_min - srr_2d.min_x) / srr_2d.step_x));
-    int col_end = std::min(srr_2d.cols - 1,
-                           (int)((ex_max - srr_2d.min_x) / srr_2d.step_x));
-    int row_start = std::max(0, (int)((ey_min - srr_2d.min_y) / srr_2d.step_y));
-    int row_end = std::min(srr_2d.rows - 1,
-                           (int)((ey_max - srr_2d.min_y) / srr_2d.step_y));
+    int col_start = std::max(0, (int)((ex_min - grid_.min_x) / grid_.step_x));
+    int col_end = std::min(grid_.cols - 1,
+                           (int)((ex_max - grid_.min_x) / grid_.step_x));
+    int row_start = std::max(0, (int)((ey_min - grid_.min_y) / grid_.step_y));
+    int row_end = std::min(grid_.rows - 1,
+                           (int)((ey_max - grid_.min_y) / grid_.step_y));
 
     for (int r = row_start; r <= row_end; ++r) {
       for (int c = col_start; c <= col_end; ++c) {
-        int idx = r * srr_2d.cols + c;
-        Bucket2D &bucket = srr_2d.buckets[idx];
+        int idx = r * grid_.cols + c;
+        Bucket2D &bucket = grid_.buckets[idx];
 
         if (segment_intersects_bucket(p1.x(), p1.y(), p2.x(), p2.y(),
                                       bucket.min_x, bucket.min_y, bucket.max_x,
@@ -1587,7 +1362,7 @@ void DelaunayClassifier::build_2d_buckets() {
             << std::endl;
 
   for (int idx = 0; idx < k * k; ++idx) {
-    Bucket2D &bucket = srr_2d.buckets[idx];
+    Bucket2D &bucket = grid_.buckets[idx];
 
     LL_Edge *edge = bucket.edges;
     while (edge != nullptr) {
@@ -1622,28 +1397,28 @@ void DelaunayClassifier::build_2d_buckets() {
   }
 
   // =========================================================================
-  // PHASE 4: Build LL_Poly — FIX #6, #7, #14
+  // PHASE 4: Build LL_Poly (Voronoi polygon regions)
   // =========================================================================
   std::cout << "  Phase 4: Building LL_Poly (Voronoi polygon regions)..."
             << std::endl;
 
-  VoronoiDiagram vd(dt);
+  VoronoiDiagram vd(dt_);
 
-  double bbox_margin = std::max(srr_2d.step_x, srr_2d.step_y) * 2;
-  double bbox_min_x = srr_2d.min_x - bbox_margin;
-  double bbox_max_x = srr_2d.max_x + bbox_margin;
-  double bbox_min_y = srr_2d.min_y - bbox_margin;
-  double bbox_max_y = srr_2d.max_y + bbox_margin;
+  double bbox_margin = std::max(grid_.step_x, grid_.step_y) * 2;
+  double bbox_min_x = grid_.min_x - bbox_margin;
+  double bbox_max_x = grid_.max_x + bbox_margin;
+  double bbox_min_y = grid_.min_y - bbox_margin;
+  double bbox_max_y = grid_.max_y + bbox_margin;
 
   int global_poly_id = 0;
 
-  // FIX #14: Map Vertex_handle directly to Voronoi cell polygon
+  // Map Vertex_handle directly to Voronoi cell polygon
   std::unordered_map<Vertex_handle, std::vector<Point>> vertex_to_cell;
 
-  // Compute centroid of all vertices for direction determination (FIX #7)
+  // Compute centroid of all vertices for direction determination
   double cx_all = 0, cy_all = 0;
   int nv_all = 0;
-  for (auto v = dt.finite_vertices_begin(); v != dt.finite_vertices_end();
+  for (auto v = dt_.finite_vertices_begin(); v != dt_.finite_vertices_end();
        ++v) {
     cx_all += v->point().x();
     cy_all += v->point().y();
@@ -1663,7 +1438,7 @@ void DelaunayClassifier::build_2d_buckets() {
     std::vector<Point> cell_polygon;
 
     if (face_it->is_unbounded()) {
-      // FIX #7: Correct unbounded Voronoi edge direction
+      // Correct unbounded Voronoi edge direction
       auto ccb_start = face_it->ccb();
       auto ccb_it = ccb_start;
 
@@ -1678,7 +1453,7 @@ void DelaunayClassifier::build_2d_buckets() {
           if (!raw_vertices.empty()) {
             Point last_pt = raw_vertices.back();
 
-            // FIX #7: Use perpendicular bisector of the dual Delaunay edge
+            // Use perpendicular bisector of the dual Delaunay edge
             // The Voronoi edge is perpendicular to its dual Delaunay edge
             // and points AWAY from the data centroid
             auto dual_edge = ccb_it->dual();
@@ -1745,12 +1520,12 @@ void DelaunayClassifier::build_2d_buckets() {
 
   // Assign clipped Voronoi cells to buckets
   for (int idx = 0; idx < k * k; ++idx) {
-    Bucket2D &bucket = srr_2d.buckets[idx];
+    Bucket2D &bucket = grid_.buckets[idx];
 
-    // FIX #6: Collect ALL clipped polygons per class
+    // Collect ALL clipped polygons per class
     std::map<int, std::vector<std::vector<Point>>> class_polygons;
 
-    // FIX #14: Use stored Vertex_handle for direct O(1) lookup
+    // Use stored Vertex_handle for direct O(1) lookup
     LL_Vertex *v = bucket.vertices;
     while (v != nullptr) {
       auto it = vertex_to_cell.find(v->vh);
@@ -1770,7 +1545,7 @@ void DelaunayClassifier::build_2d_buckets() {
       double bx = (bucket.min_x + bucket.max_x) / 2;
       double by = (bucket.min_y + bucket.max_y) / 2;
       Point center_pt(bx, by);
-      Vertex_handle nearest = dt.nearest_vertex(center_pt);
+      Vertex_handle nearest = dt_.nearest_vertex(center_pt);
 
       if (nearest != Vertex_handle()) {
         auto it = vertex_to_cell.find(nearest);
@@ -1793,9 +1568,9 @@ void DelaunayClassifier::build_2d_buckets() {
       double by = (bucket.min_y + bucket.max_y) / 2;
       bucket.type = BUCKET_HOMOGENEOUS;
       bucket.num_classes = 1;
-      Vertex_handle nv = dt.nearest_vertex(Point(bx, by));
+      Vertex_handle nv = dt_.nearest_vertex(Point(bx, by));
       bucket.dominant_class = (nv != Vertex_handle()) ? nv->info() : 0;
-      srr_2d.single_class_buckets++;
+      grid_.single_class_buckets++;
 
       LL_Polygon *poly =
           new LL_Polygon(global_poly_id++, bucket.dominant_class);
@@ -1803,10 +1578,10 @@ void DelaunayClassifier::build_2d_buckets() {
       poly->vertices = {
           Point(bucket.min_x, bucket.min_y), Point(bucket.max_x, bucket.min_y),
           Point(bucket.max_x, bucket.max_y), Point(bucket.min_x, bucket.max_y)};
-      poly->area = srr_2d.step_x * srr_2d.step_y;
+      poly->area = grid_.step_x * grid_.step_y;
       bucket.polygons = poly;
       bucket.polygon_count = 1;
-      srr_2d.total_polygons++;
+      grid_.total_polygons++;
       continue;
     }
 
@@ -1826,10 +1601,10 @@ void DelaunayClassifier::build_2d_buckets() {
     // Set bucket type
     if (bucket.num_classes == 1) {
       bucket.type = BUCKET_HOMOGENEOUS;
-      srr_2d.single_class_buckets++;
+      grid_.single_class_buckets++;
     } else if (bucket.num_classes == 2) {
       bucket.type = BUCKET_BIPARTITIONED;
-      srr_2d.bipartitioned_buckets++;
+      grid_.bipartitioned_buckets++;
 
       // Compute half-plane from a boundary edge in this bucket
       LL_Edge *be = bucket.edges;
@@ -1859,15 +1634,15 @@ void DelaunayClassifier::build_2d_buckets() {
 
       if (!found_boundary) {
         bucket.type = BUCKET_HOMOGENEOUS;
-        srr_2d.single_class_buckets++;
-        srr_2d.bipartitioned_buckets--;
+        grid_.single_class_buckets++;
+        grid_.bipartitioned_buckets--;
       }
     } else {
       bucket.type = BUCKET_MULTI_PARTITIONED;
-      srr_2d.multi_class_buckets++;
+      grid_.multi_class_buckets++;
     }
 
-    // FIX #6: Create polygon regions for EACH class, storing ALL polygons
+    // Create polygon regions for EACH class, storing ALL polygons
     LL_Polygon *prev_poly = nullptr;
     for (const auto &cp : class_polygons) {
       int cls = cp.first;
@@ -1888,38 +1663,57 @@ void DelaunayClassifier::build_2d_buckets() {
         }
         prev_poly = poly;
         bucket.polygon_count++;
-        srr_2d.total_polygons++;
+        grid_.total_polygons++;
       }
     }
   }
 
-  srr_2d.print_statistics();
+  grid_.print_statistics();
   std::cout << "2D Buckets construction complete." << std::endl;
 }
+// =============================================================================
+// POST-BUILD VALIDATION
+// =============================================================================
 
-int DelaunayClassifier::classify_single_dynamic(double x, double y) {
-  int bucket_idx = srr_2d.get_bucket_index(x, y);
+void DelaunayClassifier::validate_all_buckets() {
+  for (int idx = 0; idx < static_cast<int>(grid_.buckets.size()); ++idx) {
+    Bucket2D &bucket = grid_.buckets[idx];
 
-  if (bucket_idx < 0 || bucket_idx >= static_cast<int>(srr_2d.buckets.size())) {
-    return classify_single(x, y);
+    if (bucket.dominant_class < 0) {
+      // This bucket has no assigned class — find one from nearest vertex
+      double cx = (bucket.min_x + bucket.max_x) / 2.0;
+      double cy = (bucket.min_y + bucket.max_y) / 2.0;
+      Vertex_handle nv = dt_.nearest_vertex(Point(cx, cy));
+      if (nv != Vertex_handle()) {
+        bucket.dominant_class = nv->info();
+        bucket.type = BUCKET_HOMOGENEOUS;
+        bucket.num_classes = 1;
+      }
+    }
+
+    // Ensure MULTI_PARTITIONED buckets have a valid dominant_class
+    // as the final fallback for floating-point polygon gaps
+    if (bucket.type == BUCKET_MULTI_PARTITIONED &&
+        bucket.dominant_class < 0 && bucket.polygons != nullptr) {
+      // Use the class of the polygon with the largest area
+      double max_area = -1.0;
+      LL_Polygon *poly = bucket.polygons;
+      while (poly != nullptr) {
+        if (poly->area > max_area) {
+          max_area = poly->area;
+          bucket.dominant_class = poly->class_label;
+        }
+        poly = poly->next;
+      }
+    }
   }
-
-  const Bucket2D &bucket = srr_2d.buckets[bucket_idx];
-  int result = bucket.classify_point(x, y);
-
-  // If bucket classification returns a valid label, use it
-  if (result >= 0)
-    return result;
-
-  // Fallback to full classification
-  return classify_single(x, y);
 }
 
 std::vector<std::pair<int, std::vector<Point>>>
-DelaunayClassifier::compute_class_regions() {
+DelaunayClassifier::compute_class_regions() const {
   std::vector<std::pair<int, std::vector<Point>>> regions;
 
-  for (const auto &bucket : srr_2d.buckets) {
+  for (const auto &bucket : grid_.buckets) {
     LL_Polygon *poly = bucket.polygons;
     while (poly != nullptr) {
       if (poly->inside_label == 1 && !poly->vertices.empty()) {
