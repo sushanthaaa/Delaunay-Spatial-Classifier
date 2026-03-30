@@ -1,3 +1,3 @@
 variant,avg_insert_ns,avg_move_ns,avg_delete_ns,notes
-Full Dynamic (SRR+Buckets),169300,306883,148264,With local rebuild
-No SRR Maintenance,160444,283477,158556,CGAL DT only
+Full Dynamic (SRR+Buckets),158779,294033,206173,With local rebuild
+No SRR Maintenance,155396,298073,151454,CGAL DT only

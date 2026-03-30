@@ -1,0 +1,23 @@
+variant,avg_insert_ns,avg_move_ns,avg_delete_ns,notes,dataset
+Full Dynamic (SRR+Buckets),201275.0,307500.0,145644.0,With local rebuild,moons
+No SRR Maintenance,151185.0,307881.0,154546.0,CGAL DT only,moons
+Full Dynamic (SRR+Buckets),149917.0,285502.0,141629.0,With local rebuild,circles
+No SRR Maintenance,151944.0,281848.0,169127.0,CGAL DT only,circles
+Full Dynamic (SRR+Buckets),158331.0,319977.0,164542.0,With local rebuild,spiral
+No SRR Maintenance,165700.0,319346.0,159579.0,CGAL DT only,spiral
+Full Dynamic (SRR+Buckets),158779.0,294033.0,206173.0,With local rebuild,gaussian_quantiles
+No SRR Maintenance,155396.0,298073.0,151454.0,CGAL DT only,gaussian_quantiles
+Full Dynamic (SRR+Buckets),234729.0,442102.0,219873.0,With local rebuild,cassini
+No SRR Maintenance,234052.0,461535.0,246921.0,CGAL DT only,cassini
+Full Dynamic (SRR+Buckets),166644.0,279460.0,144794.0,With local rebuild,checkerboard
+No SRR Maintenance,142119.0,281365.0,143902.0,CGAL DT only,checkerboard
+Full Dynamic (SRR+Buckets),236512.0,447102.0,261537.0,With local rebuild,blobs
+No SRR Maintenance,226738.0,467646.0,214367.0,CGAL DT only,blobs
+Full Dynamic (SRR+Buckets),630719.0,1223360.0,647371.0,With local rebuild,earthquake
+No SRR Maintenance,638294.0,1264270.0,635088.0,CGAL DT only,earthquake
+Full Dynamic (SRR+Buckets),36468.8,68247.8,37541.7,With local rebuild,wine
+No SRR Maintenance,34893.7,67939.6,31989.7,CGAL DT only,wine
+Full Dynamic (SRR+Buckets),90535.4,173369.0,84233.4,With local rebuild,cancer
+No SRR Maintenance,99437.4,171871.0,82716.6,CGAL DT only,cancer
+Full Dynamic (SRR+Buckets),957346.0,1874220.0,939848.0,With local rebuild,bloodmnist
+No SRR Maintenance,959042.0,1912190.0,934971.0,CGAL DT only,bloodmnist

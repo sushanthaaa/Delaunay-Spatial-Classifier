@@ -169,15 +169,13 @@ Delaunay-Triangulation-Classification/
 │
 ├── scripts/                            # Python scripts
 │   ├── generate_datasets.py            # Unified dataset generator (all 11 datasets)
+│   ├── generate_figures.py             # Publication figure generator (per-dataset + summary)
 │   ├── benchmark_cv.py                 # 10-fold CV with statistical significance tests
 │   ├── ablation_study.py               # Python ablation study wrapper
-│   ├── scalability_test.py             # Scalability analysis O(n log n) training
-│   ├── generate_publication_figures.py # Publication figures (per dataset)
-│   ├── generate_figures.py             # Additional benchmark figures
-│   └── visualizer.py                   # Legacy CLI visualization utility
+│   └── scalability_test.py             # Scalability analysis O(n log n) training
 │
 ├── tests/                              # Unit tests
-│   └── test_classifier.py              # Comprehensive test suite (12 tests)
+│   └── test_classifier.py              # Comprehensive test suite (23 tests)
 │
 ├── data/
 │   ├── train/                          # Training datasets
@@ -193,6 +191,10 @@ Delaunay-Triangulation-Classification/
 │   ├── ablation_{dataset}.csv          # Ablation study results
 │   ├── scalability_train.csv           # Scalability timing
 │   └── scalability_inference.csv       # O(1) inference verification
+│
+├── figures/                            # Generated publication figures
+│   ├── {dataset}/                      # 7 pipeline figures per dataset
+│   └── summary_*.png                   # Comparison charts
 │
 ├── CMakeLists.txt                      # CMake build configuration
 └── README.md                           # This file
@@ -419,14 +421,15 @@ pytest tests/test_classifier.py -v
 |----------|-------|-------------|
 | `TestDataLoading` | 2 | CSV format, label validation |
 | `TestDelaunayTriangulation` | 2 | Circumcircle property, basic construction |
-| `TestCppClassifier` | 2 | Static mode, accuracy on separable data |
-| `TestOutlierDetection` | 1 | Isolated point detection |
-| `TestSRRGrid` | 2 | Grid size formula, O(1) lookup |
-| `TestDynamicOperations` | 1 | Insert preserves Delaunay |
-| `TestClassificationVoting` | 1 | Majority vote correctness |
-| `TestDatasetGeneration` | 1 | Output file format |
+| `TestOutlierDetection` | 1 | Isolated point detection via k-NN density |
+| `TestGridAndBuckets` | 4 | Grid sizing (√n), O(1) lookup, bucket index, clamping |
+| `TestDecisionBoundary` | 3 | Half-plane separation, nearest-vertex, homogeneous |
+| `TestBucketClassification` | 4 | Ray casting, homogeneous/bipartitioned/multi buckets |
+| `TestDynamicOperations` | 2 | Insert preserves Delaunay, remove reduces count |
+| `TestDatasetGeneration` | 2 | Training file format, test file pairs (_X/_y) |
+| `TestCppClassifier` | 3 | Static mode, accuracy on separable data, dynamic mode |
 
-**Total: 12 tests**
+**Total: 23 tests**
 
 ---
 
@@ -466,6 +469,10 @@ echo "=== Running Dynamic Stress Tests ==="
 for ds in moons circles spiral gaussian_quantiles cassini checkerboard blobs earthquake wine cancer bloodmnist; do
   ./build/main dynamic data/train/${ds}_train.csv data/train/${ds}_dynamic_stream.csv results/dynamic_${ds}.csv
 done
+
+# 7. Generate publication figures
+echo "=== Generating Figures ==="
+python scripts/generate_figures.py
 
 echo "=== Complete! ==="
 ```

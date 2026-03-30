@@ -13,13 +13,6 @@ Thumbs.db
 *~
 
 # ------------------------------------------------------------------------------
-# Deprecated/Unused Scripts
-# ------------------------------------------------------------------------------
-scripts/benchmark.py
-scripts/data_generator.py
-scripts/generate_spatial_datasets.py
-
-# ------------------------------------------------------------------------------
 # IDE and Editor
 # ------------------------------------------------------------------------------
 .vscode/
@@ -101,11 +94,11 @@ drafts/
 *.tar.gz
 
 # EXCEPTION: Keep key figures for README
-!figures/wine/4_decision_boundary.png
-!figures/earthquake/4_decision_boundary.png
-!figures/spiral/4_decision_boundary.png
+!figures/wine/4_decision_boundaries.png
+!figures/earthquake/4_decision_boundaries.png
+!figures/spiral/4_decision_boundaries.png
 !figures/summary_scalability.png
-!figures/summary_dynamic_updates.png
+!figures/summary_dynamic.png
 
 # ------------------------------------------------------------------------------
 # Temporary Files

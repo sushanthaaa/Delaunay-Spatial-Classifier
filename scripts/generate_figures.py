@@ -1,765 +1,954 @@
 #!/usr/bin/env python3
 """
-Publication-Ready Figure Generator for Delaunay Triangulation Classifier
-Generates all figures needed for IEEE/Elsevier publication.
+Unified Publication Figure Generator for Delaunay Triangulation Classifier
 
-Figures Generated:
-1. Raw dataset visualization
-2. Delaunay triangulation overlay
-3. Outlier removal before/after
-4. Decision boundary visualization
-5. SRR grid visualization
-6. Dynamic update illustration
-7. Scalability plots
-8. Accuracy comparison bar charts
-9. Inference time comparison
+Generates ALL publication figures from a single script, matching the visual
+style of the V19 paper:
+  - Red solid lines: same-class DT edges
+  - Red dashed lines: cross-class DT edges
+  - Black solid lines: decision boundaries (extended to plot borders)
+  - Distinct marker shapes per class: squares, triangles, circles, diamonds
+  - White background, black border frame, no axis ticks
+  - Gray dotted grid for SRR/2D Buckets overlay
+
+Figure categories:
+  A. Per-dataset pipeline figures (1–7 per dataset)
+  B. Summary comparison charts (accuracy, speedup, dynamic, scalability)
+
+Usage:
+  python scripts/generate_publication_figures.py                        # All
+  python scripts/generate_publication_figures.py --datasets moons,wine  # Specific
+  python scripts/generate_publication_figures.py --summary-only         # Charts only
 """
 
+import argparse
+import math
 import os
+import sys
+import warnings
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
-from matplotlib.collections import LineCollection, PolyCollection
-from matplotlib.colors import ListedColormap
-from scipy.spatial import Delaunay, Voronoi, voronoi_plot_2d
+from matplotlib.collections import LineCollection
+from matplotlib.patches import Rectangle
+from matplotlib.lines import Line2D
+from scipy.spatial import Delaunay, Voronoi, ConvexHull
 from sklearn.neighbors import NearestNeighbors
-import warnings
+
 warnings.filterwarnings('ignore')
 
-# Publication-quality settings
-plt.rcParams.update({
-    'font.family': 'serif',
-    'font.size': 10,
-    'axes.labelsize': 11,
-    'axes.titlesize': 12,
-    'legend.fontsize': 9,
-    'xtick.labelsize': 9,
-    'ytick.labelsize': 9,
-    'figure.dpi': 300,
-    'savefig.dpi': 300,
-    'savefig.bbox': 'tight',
-    'savefig.pad_inches': 0.1,
-})
+# =============================================================================
+# STYLE CONFIGURATION — matches V19 paper exactly
+# =============================================================================
 
-# Color schemes for classes (colorblind-friendly, supports up to 12 classes)
-CLASS_COLORS = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', 
-                '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#aec7e8', '#ffbb78']
-CMAP_CLASSES = ListedColormap(CLASS_COLORS)
+# Marker shapes per class (up to 10 classes)
+MARKERS = ['s', '^', 'o', 'D', 'p', 'h', '*', 'v', '<', '>']
+MARKER_SIZE = 45
+
+# Class colors (colorblind-accessible, matches paper)
+CLASS_COLORS = [
+    '#0066CC',  # Blue (class 0)
+    '#FFD700',  # Yellow/Gold (class 1)
+    '#00CC66',  # Green (class 2)
+    '#CC3300',  # Red (class 3)
+    '#9933CC',  # Purple (class 4)
+    '#FF6600',  # Orange (class 5)
+    '#00CCCC',  # Cyan (class 6)
+    '#CC0066',  # Magenta (class 7)
+    '#666666',  # Gray (class 8)
+    '#339900',  # Dark Green (class 9)
+]
+
+# Edge colors
+EDGE_SAME_CLASS = '#CC0000'       # Red solid for same-class DT edges
+EDGE_CROSS_CLASS = '#CC0000'      # Red dashed for cross-class DT edges
+DECISION_BOUNDARY = '#000000'     # Black for decision boundaries
+GRID_COLOR = '#888888'            # Gray for SRR grid lines
+
+# Figure settings
+FIG_SIZE = (7, 7)
+DPI = 300
+BG_COLOR = 'white'
+
+ALL_DATASETS = [
+    'moons', 'circles', 'spiral', 'gaussian_quantiles', 'cassini',
+    'checkerboard', 'blobs', 'earthquake',
+    'wine', 'cancer', 'bloodmnist'
+]
+
+DATASET_NAMES = {
+    'moons': 'Moons', 'circles': 'Circles', 'spiral': 'Spiral',
+    'gaussian_quantiles': 'Gaussian Quantiles', 'cassini': 'Cassini',
+    'checkerboard': 'Checkerboard', 'blobs': 'Blobs',
+    'earthquake': 'Earthquake', 'wine': 'Wine',
+    'cancer': 'Breast Cancer', 'bloodmnist': 'BloodMNIST'
+}
 
 
-def load_dataset(train_path, test_path=None):
-    """Load dataset from CSV files."""
-    train_df = pd.read_csv(train_path, header=None, names=['x', 'y', 'label'])
-    X_train = train_df[['x', 'y']].values
-    y_train = train_df['label'].values.astype(int)
-    
-    if test_path and os.path.exists(test_path):
-        test_df = pd.read_csv(test_path, header=None, names=['x', 'y', 'label'])
-        X_test = test_df[['x', 'y']].values
-        y_test = test_df['label'].values.astype(int)
-        return X_train, y_train, X_test, y_test
-    
-    return X_train, y_train, None, None
+# =============================================================================
+# DATA LOADING
+# =============================================================================
+
+def load_csv(path):
+    """Load x,y,label CSV (no header). Returns X, y."""
+    if not os.path.exists(path):
+        return None, None
+    df = pd.read_csv(path, header=None, names=['x', 'y', 'label'])
+    return df[['x', 'y']].values, df['label'].values.astype(int)
 
 
-def identify_outliers(X, y, k=3):
-    """Identify outliers using k-NN same-class density."""
-    outlier_mask = np.zeros(len(X), dtype=bool)
-    
-    nn = NearestNeighbors(n_neighbors=k+1)
-    nn.fit(X)
-    distances, indices = nn.kneighbors(X)
-    
-    for i in range(len(X)):
-        neighbors = indices[i, 1:]  # Exclude self
-        same_class_count = np.sum(y[neighbors] == y[i])
-        if same_class_count < k // 2:
-            outlier_mask[i] = True
-    
+def compute_bounds(X, margin_frac=0.08):
+    """Compute plot bounds with relative margin."""
+    rx = X[:, 0].max() - X[:, 0].min()
+    ry = X[:, 1].max() - X[:, 1].min()
+    mx = max(rx * margin_frac, 1e-3)
+    my = max(ry * margin_frac, 1e-3)
+    return (X[:, 0].min() - mx, X[:, 0].max() + mx,
+            X[:, 1].min() - my, X[:, 1].max() + my)
+
+
+# =============================================================================
+# OUTLIER DETECTION (mirrors C++ Phase 1 logic)
+# =============================================================================
+
+def detect_outliers(X, y, k=3, multiplier=3.0):
+    """Detect outliers using DT-based same-class connectivity.
+
+    Mirrors the C++ implementation:
+    1. Build temporary DT
+    2. Compute median edge length
+    3. Threshold = median * multiplier
+    4. Build same-class adjacency graph (edges < threshold)
+    5. DFS for connected components
+    6. Remove components with < k members
+    """
+    if len(X) < 4:
+        return np.zeros(len(X), dtype=bool)
+
+    tri = Delaunay(X)
+
+    # Compute all edge lengths
+    edges = set()
+    for simplex in tri.simplices:
+        for i in range(3):
+            e = tuple(sorted([simplex[i], simplex[(i + 1) % 3]]))
+            edges.add(e)
+
+    edge_lengths = []
+    for i, j in edges:
+        d = np.sqrt(np.sum((X[i] - X[j]) ** 2))
+        edge_lengths.append((i, j, d))
+
+    if not edge_lengths:
+        return np.zeros(len(X), dtype=bool)
+
+    lengths_only = sorted([e[2] for e in edge_lengths])
+    median_len = lengths_only[len(lengths_only) // 2]
+    threshold = median_len * multiplier
+
+    # Build same-class adjacency
+    n = len(X)
+    adj = [[] for _ in range(n)]
+    for i, j, d in edge_lengths:
+        if y[i] == y[j] and d < threshold:
+            adj[i].append(j)
+            adj[j].append(i)
+
+    # DFS for connected components
+    visited = [False] * n
+    outlier_mask = np.zeros(n, dtype=bool)
+
+    for start in range(n):
+        if visited[start]:
+            continue
+        component = []
+        stack = [start]
+        visited[start] = True
+        while stack:
+            curr = stack.pop()
+            component.append(curr)
+            for nb in adj[curr]:
+                if not visited[nb]:
+                    visited[nb] = True
+                    stack.append(nb)
+        if len(component) < k:
+            for idx in component:
+                outlier_mask[idx] = True
+
     return outlier_mask
 
 
-def create_srr_grid(X, n_buckets=None):
-    """Create SRR grid structure."""
-    if n_buckets is None:
-        n_buckets = max(5, int(np.sqrt(len(X))))
-    
-    x_min, y_min = X.min(axis=0)
-    x_max, y_max = X.max(axis=0)
-    
-    # Add small padding
-    padding = 0.05 * max(x_max - x_min, y_max - y_min)
-    x_min -= padding
-    x_max += padding
-    y_min -= padding
-    y_max += padding
-    
-    step_x = (x_max - x_min) / n_buckets
-    step_y = (y_max - y_min) / n_buckets
-    
-    return {
-        'n_buckets': n_buckets,
-        'x_min': x_min, 'x_max': x_max,
-        'y_min': y_min, 'y_max': y_max,
-        'step_x': step_x, 'step_y': step_y
-    }
+# =============================================================================
+# DRAWING PRIMITIVES — Paper Style
+# =============================================================================
+
+def create_figure(figsize=FIG_SIZE):
+    """Create figure with paper style: white bg, black border, no ticks."""
+    fig, ax = plt.subplots(figsize=figsize, facecolor=BG_COLOR)
+    ax.set_facecolor(BG_COLOR)
+    ax.set_aspect('equal', adjustable='datalim')
+    for spine in ax.spines.values():
+        spine.set_color('black')
+        spine.set_linewidth(2)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    return fig, ax
+
+
+def draw_points(ax, X, y, size=MARKER_SIZE, alpha=1.0, zorder=5):
+    """Draw points with distinct markers per class (paper style)."""
+    for label in np.unique(y):
+        mask = y == label
+        color = CLASS_COLORS[label % len(CLASS_COLORS)]
+        marker = MARKERS[label % len(MARKERS)]
+        ax.scatter(X[mask, 0], X[mask, 1], c=color, marker=marker,
+                   s=size, edgecolors='black', linewidths=0.5,
+                   alpha=alpha, zorder=zorder)
+
+
+def draw_dt_edges_by_class(ax, X, y, tri, lw_same=1.5, lw_cross=1.0):
+    """Draw DT edges: solid red = same-class, dashed red = cross-class."""
+    same_lines, cross_lines = [], []
+    seen = set()
+    for simplex in tri.simplices:
+        for i in range(3):
+            a, b = simplex[i], simplex[(i + 1) % 3]
+            e = (min(a, b), max(a, b))
+            if e in seen:
+                continue
+            seen.add(e)
+            if y[a] == y[b]:
+                same_lines.append([X[a], X[b]])
+            else:
+                cross_lines.append([X[a], X[b]])
+
+    if same_lines:
+        ax.add_collection(LineCollection(
+            same_lines, colors=EDGE_SAME_CLASS,
+            linewidths=lw_same, linestyles='-', zorder=1))
+    if cross_lines:
+        ax.add_collection(LineCollection(
+            cross_lines, colors=EDGE_CROSS_CLASS,
+            linewidths=lw_cross, linestyles='--', zorder=1))
+
+
+def draw_dt_edges_uniform(ax, X, tri, color=EDGE_SAME_CLASS, lw=1.2,
+                          ls='-'):
+    """Draw all DT edges in uniform style."""
+    lines = []
+    seen = set()
+    for simplex in tri.simplices:
+        for i in range(3):
+            a, b = simplex[i], simplex[(i + 1) % 3]
+            e = (min(a, b), max(a, b))
+            if e in seen:
+                continue
+            seen.add(e)
+            lines.append([X[a], X[b]])
+    if lines:
+        ax.add_collection(LineCollection(
+            lines, colors=color, linewidths=lw, linestyles=ls, zorder=1))
+
+
+def draw_decision_boundaries(ax, X, y, xlim, ylim, lw=2.5):
+    """Draw Voronoi-based decision boundaries as black lines, extended to axes."""
+    try:
+        vor = Voronoi(X)
+    except Exception:
+        return
+
+    center = X.mean(axis=0)
+
+    # Finite ridges
+    for pidx, simplex in zip(vor.ridge_points, vor.ridge_vertices):
+        if y[pidx[0]] == y[pidx[1]]:
+            continue
+        if simplex[0] >= 0 and simplex[1] >= 0:
+            v0 = vor.vertices[simplex[0]]
+            v1 = vor.vertices[simplex[1]]
+            ax.plot([v0[0], v1[0]], [v0[1], v1[1]],
+                    color=DECISION_BOUNDARY, linewidth=lw, zorder=2)
+
+    # Infinite ridges — extend to plot boundary
+    for pidx, simplex in zip(vor.ridge_points, vor.ridge_vertices):
+        if y[pidx[0]] == y[pidx[1]]:
+            continue
+        if -1 not in simplex:
+            continue
+
+        finite_idx = simplex[1] if simplex[0] == -1 else simplex[0]
+        t = X[pidx[1]] - X[pidx[0]]
+        t = t / np.linalg.norm(t)
+        n = np.array([-t[1], t[0]])
+
+        midpoint = X[pidx].mean(axis=0)
+        direction = np.sign(np.dot(midpoint - center, n)) * n
+
+        far = vor.vertices[finite_idx] + direction * 100
+        ax.plot([vor.vertices[finite_idx][0], far[0]],
+                [vor.vertices[finite_idx][1], far[1]],
+                color=DECISION_BOUNDARY, linewidth=lw, zorder=2,
+                clip_on=True)
+
+
+def draw_srr_grid(ax, X, xlim, ylim):
+    """Draw SRR grid (ceil(sqrt(n)) x ceil(sqrt(n))) as gray dotted lines."""
+    n = len(X)
+    k = max(2, int(math.ceil(math.sqrt(n))))
+    x_range = xlim[1] - xlim[0]
+    y_range = ylim[1] - ylim[0]
+    for i in range(1, k):
+        ax.axvline(xlim[0] + i * x_range / k, color=GRID_COLOR,
+                   linestyle=':', linewidth=0.6, alpha=0.6, zorder=0)
+        ax.axhline(ylim[0] + i * y_range / k, color=GRID_COLOR,
+                   linestyle=':', linewidth=0.6, alpha=0.6, zorder=0)
+    return k
+
+
+def make_legend(ax, n_classes):
+    """Add class legend with matching markers."""
+    handles = []
+    for i in range(n_classes):
+        handles.append(Line2D(
+            [0], [0], marker=MARKERS[i % len(MARKERS)], color='w',
+            markerfacecolor=CLASS_COLORS[i % len(CLASS_COLORS)],
+            markeredgecolor='black', markersize=8,
+            label=f'Class {i}'))
+    ax.legend(handles=handles, loc='best', fontsize=8, framealpha=0.9)
+
+
+def save_fig(fig, path):
+    """Save and close figure."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    plt.savefig(path, dpi=DPI, bbox_inches='tight', facecolor=BG_COLOR)
+    plt.close(fig)
+    print(f"    Saved: {os.path.basename(path)}")
 
 
 # =============================================================================
-# FIGURE 1: Raw Dataset Visualization
+# PER-DATASET PIPELINE FIGURES
 # =============================================================================
-def fig_raw_dataset(X, y, title, save_path):
-    """Scatter plot of raw dataset with class colors."""
-    fig, ax = plt.subplots(figsize=(5, 4))
-    
-    n_classes = len(np.unique(y))
-    scatter = ax.scatter(X[:, 0], X[:, 1], c=y, cmap=CMAP_CLASSES, 
-                         s=15, alpha=0.7, edgecolors='white', linewidths=0.3)
-    
-    ax.set_xlabel('X')
-    ax.set_ylabel('Y')
-    ax.set_title(f'{title} Dataset (n={len(X)}, {n_classes} classes)')
-    
-    # Legend
-    handles = [mpatches.Patch(color=CLASS_COLORS[i], label=f'Class {i}') 
-               for i in range(n_classes)]
-    ax.legend(handles=handles, loc='best', framealpha=0.9)
-    
-    ax.set_aspect('equal', adjustable='box')
-    plt.tight_layout()
-    plt.savefig(save_path)
-    plt.close()
-    print(f"  Saved: {save_path}")
+
+def fig_1_raw_data(X, y, name, out_dir):
+    """Figure 1: Raw data points with class markers."""
+    fig, ax = create_figure()
+    draw_points(ax, X, y)
+    xlim = compute_bounds(X)
+    ax.set_xlim(xlim[0], xlim[1])
+    ax.set_ylim(xlim[2], xlim[3])
+    n_cls = len(np.unique(y))
+    make_legend(ax, n_cls)
+    ax.set_title(f'{name} — (a) Raw Data (n={len(X)}, {n_cls} classes)',
+                 fontsize=12, fontweight='bold')
+    save_fig(fig, f'{out_dir}/1_raw_data.png')
 
 
-# =============================================================================
-# FIGURE 2: Delaunay Triangulation Overlay
-# =============================================================================
-def fig_delaunay_triangulation(X, y, title, save_path):
-    """Dataset with Delaunay triangulation overlay."""
-    fig, ax = plt.subplots(figsize=(5, 4))
-    
-    # Compute Delaunay triangulation
+def fig_2_delaunay_triangulation(X, y, name, out_dir):
+    """Figure 2: DT mesh with same-class (solid) and cross-class (dashed) edges."""
+    fig, ax = create_figure()
     tri = Delaunay(X)
-    
-    # Draw triangulation edges
-    edges = set()
-    for simplex in tri.simplices:
-        for i in range(3):
-            edge = tuple(sorted([simplex[i], simplex[(i+1) % 3]]))
-            edges.add(edge)
-    
-    lines = [[X[e[0]], X[e[1]]] for e in edges]
-    lc = LineCollection(lines, colors='gray', linewidths=0.3, alpha=0.5)
-    ax.add_collection(lc)
-    
-    # Draw points
-    n_classes = len(np.unique(y))
-    ax.scatter(X[:, 0], X[:, 1], c=y, cmap=CMAP_CLASSES, 
-               s=20, alpha=0.9, edgecolors='black', linewidths=0.3, zorder=5)
-    
-    ax.set_xlabel('X')
-    ax.set_ylabel('Y')
-    ax.set_title(f'{title}: Delaunay Triangulation\n({len(tri.simplices)} triangles)')
-    
-    ax.set_aspect('equal', adjustable='box')
-    ax.autoscale_view()
-    plt.tight_layout()
-    plt.savefig(save_path)
-    plt.close()
-    print(f"  Saved: {save_path}")
+    draw_dt_edges_by_class(ax, X, y, tri)
+    draw_points(ax, X, y)
+    xlim = compute_bounds(X)
+    ax.set_xlim(xlim[0], xlim[1])
+    ax.set_ylim(xlim[2], xlim[3])
+    ax.set_title(f'{name} — (b) Delaunay Triangulation '
+                 f'({len(tri.simplices)} triangles)',
+                 fontsize=12, fontweight='bold')
+    save_fig(fig, f'{out_dir}/2_delaunay_triangulation.png')
 
 
-# =============================================================================
-# FIGURE 3: Outlier Removal Before/After
-# =============================================================================
-def fig_outlier_removal(X, y, title, save_path):
-    """Side-by-side before/after outlier removal with DT mesh."""
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
-    
-    outlier_mask = identify_outliers(X, y, k=3)
-    n_outliers = np.sum(outlier_mask)
-    
-    n_classes = len(np.unique(y))
-    
-    # Before (with DT mesh and outliers highlighted)
-    ax = axes[0]
-    try:
-        tri = Delaunay(X)
-        edges = set()
-        for simplex in tri.simplices:
-            for i in range(3):
-                edge = tuple(sorted([simplex[i], simplex[(i+1) % 3]]))
-                edges.add(edge)
-        lines = [[X[e[0]], X[e[1]]] for e in edges]
-        lc = LineCollection(lines, colors='lightgray', linewidths=0.4, alpha=0.6)
-        ax.add_collection(lc)
-    except:
-        pass
-    
-    ax.scatter(X[~outlier_mask, 0], X[~outlier_mask, 1], c=y[~outlier_mask], 
-               cmap=CMAP_CLASSES, s=25, alpha=0.9, edgecolors='black', linewidths=0.3, zorder=5)
-    ax.scatter(X[outlier_mask, 0], X[outlier_mask, 1], c='red', 
-               s=60, marker='x', linewidths=2, label=f'Outliers ({n_outliers})', zorder=10)
-    ax.set_xlabel('Feature 1 (Scaled)')
-    ax.set_ylabel('Feature 2 (Scaled)')
-    ax.set_title(f'Before: {len(X)} points\n(outliers marked in red)')
-    ax.legend(loc='best')
-    ax.set_aspect('equal', adjustable='box')
-    ax.autoscale_view()
-    
-    # After (outliers removed with DT mesh)
-    ax = axes[1]
+def fig_3_outlier_removal(X, y, name, out_dir):
+    """Figure 3: Outlier removal — kept edges solid, removed edges dashed,
+    outlier points highlighted."""
+    outlier_mask = detect_outliers(X, y, k=3)
+    n_outliers = outlier_mask.sum()
+
     X_clean = X[~outlier_mask]
     y_clean = y[~outlier_mask]
-    
-    try:
-        tri_clean = Delaunay(X_clean)
-        edges = set()
-        for simplex in tri_clean.simplices:
+
+    fig, ax = create_figure()
+
+    # Draw full DT with class-aware edges
+    if len(X) >= 3:
+        tri_full = Delaunay(X)
+        # Edges touching outliers → thin dashed gray
+        # Edges between clean points → solid red / dashed red by class
+        seen = set()
+        kept_same, kept_cross, removed = [], [], []
+        for simplex in tri_full.simplices:
             for i in range(3):
-                edge = tuple(sorted([simplex[i], simplex[(i+1) % 3]]))
-                edges.add(edge)
-        lines = [[X_clean[e[0]], X_clean[e[1]]] for e in edges]
-        lc = LineCollection(lines, colors='lightgray', linewidths=0.4, alpha=0.6)
-        ax.add_collection(lc)
-    except:
-        pass
-    
-    ax.scatter(X_clean[:, 0], X_clean[:, 1], c=y_clean, 
-               cmap=CMAP_CLASSES, s=25, alpha=0.9, edgecolors='black', linewidths=0.3, zorder=5)
-    ax.set_xlabel('Feature 1 (Scaled)')
-    ax.set_ylabel('Feature 2 (Scaled)')
-    ax.set_title(f'After: {len(X_clean)} points\n({n_outliers} outliers removed)')
-    ax.set_aspect('equal', adjustable='box')
-    ax.autoscale_view()
-    
-    fig.suptitle(f'Delaunay Classification: {title} - Outlier Removal', fontsize=12, y=1.02)
-    plt.tight_layout()
-    plt.savefig(save_path)
-    plt.close()
-    print(f"  Saved: {save_path}")
+                a, b = simplex[i], simplex[(i + 1) % 3]
+                e = (min(a, b), max(a, b))
+                if e in seen:
+                    continue
+                seen.add(e)
+                if outlier_mask[a] or outlier_mask[b]:
+                    removed.append([X[a], X[b]])
+                elif y[a] == y[b]:
+                    kept_same.append([X[a], X[b]])
+                else:
+                    kept_cross.append([X[a], X[b]])
+
+        if kept_same:
+            ax.add_collection(LineCollection(
+                kept_same, colors=EDGE_SAME_CLASS,
+                linewidths=1.5, linestyles='-', zorder=1))
+        if kept_cross:
+            ax.add_collection(LineCollection(
+                kept_cross, colors=EDGE_CROSS_CLASS,
+                linewidths=1.0, linestyles='--', zorder=1))
+        if removed:
+            ax.add_collection(LineCollection(
+                removed, colors='#CC0000',
+                linewidths=0.6, linestyles='--', alpha=0.4, zorder=1))
+
+    # Draw clean points normally
+    draw_points(ax, X[~outlier_mask], y[~outlier_mask])
+
+    # Highlight outliers with red X
+    if n_outliers > 0:
+        ax.scatter(X[outlier_mask, 0], X[outlier_mask, 1],
+                   c='red', marker='x', s=80, linewidths=2,
+                   zorder=10, label=f'Outliers ({n_outliers})')
+        ax.legend(loc='best', fontsize=8, framealpha=0.9)
+
+    xlim = compute_bounds(X)
+    ax.set_xlim(xlim[0], xlim[1])
+    ax.set_ylim(xlim[2], xlim[3])
+    ax.set_title(f'{name} — (c) Outlier Removal '
+                 f'({len(X)}→{len(X_clean)} points, {n_outliers} removed)',
+                 fontsize=11, fontweight='bold')
+    save_fig(fig, f'{out_dir}/3_outlier_removal.png')
+    return X_clean, y_clean
 
 
-# =============================================================================
-# FIGURE 4: Decision Boundary Visualization
-# =============================================================================
-def fig_decision_boundary(X, y, title, save_path, resolution=200):
-    """Decision boundary with DT mesh overlay and thick boundary lines."""
-    fig, ax = plt.subplots(figsize=(6, 5))
-    
-    # Remove outliers first
-    outlier_mask = identify_outliers(X, y, k=3)
-    X_clean = X[~outlier_mask]
-    y_clean = y[~outlier_mask]
-    
-    if len(X_clean) < 4:
-        X_clean, y_clean = X, y
-    
-    # Build Delaunay triangulation
-    try:
-        tri = Delaunay(X_clean)
-    except:
-        print(f"  Warning: Could not build triangulation for {title}")
+def fig_4_decision_boundaries(X, y, name, out_dir):
+    """Figure 4: DT mesh + decision boundaries (black) + SRR grid."""
+    if len(X) < 3:
         return
-    
-    # Draw DT mesh first (background)
-    edges = set()
-    for simplex in tri.simplices:
-        for i in range(3):
-            edge = tuple(sorted([simplex[i], simplex[(i+1) % 3]]))
-            edges.add(edge)
-    lines = [[X_clean[e[0]], X_clean[e[1]]] for e in edges]
-    lc = LineCollection(lines, colors='lightgray', linewidths=0.4, alpha=0.6)
-    ax.add_collection(lc)
-    
-    # Create mesh grid for decision boundary
-    x_min, x_max = X[:, 0].min() - 0.2, X[:, 0].max() + 0.2
-    y_min, y_max = X[:, 1].min() - 0.2, X[:, 1].max() + 0.2
-    
-    xx, yy = np.meshgrid(np.linspace(x_min, x_max, resolution),
-                          np.linspace(y_min, y_max, resolution))
-    grid_points = np.c_[xx.ravel(), yy.ravel()]
-    
-    # Classify each grid point
-    simplex_indices = tri.find_simplex(grid_points)
-    Z = np.zeros(len(grid_points))
-    
-    for i, si in enumerate(simplex_indices):
-        if si >= 0:
-            # Get vertices of the containing triangle
-            vertices = tri.simplices[si]
-            vertex_labels = y_clean[vertices]
-            # Majority vote
-            Z[i] = np.bincount(vertex_labels.astype(int)).argmax()
-        else:
-            # Outside triangulation - use nearest vertex
-            dists = np.sum((X_clean - grid_points[i])**2, axis=1)
-            Z[i] = y_clean[np.argmin(dists)]
-    
-    Z = Z.reshape(xx.shape)
-    
-    # Plot thick BLACK decision boundary lines (like reference image)
-    n_classes = len(np.unique(y))
-    ax.contour(xx, yy, Z, levels=np.arange(0.5, n_classes, 1), 
-               colors='black', linewidths=2.0, zorder=4)
-    
-    # Plot training points on top
-    ax.scatter(X_clean[:, 0], X_clean[:, 1], c=y_clean, cmap=CMAP_CLASSES, 
-               s=30, alpha=0.9, edgecolors='black', linewidths=0.3, zorder=5)
-    
-    ax.set_xlabel('Feature 1 (Scaled)')
-    ax.set_ylabel('Feature 2 (Scaled)')
-    ax.set_title(f'Delaunay Classification: {title}')
-    
-    ax.set_aspect('equal', adjustable='box')
-    ax.autoscale_view()
-    plt.tight_layout()
-    plt.savefig(save_path)
-    plt.close()
-    print(f"  Saved: {save_path}")
+
+    fig, ax = create_figure()
+    tri = Delaunay(X)
+    xlim = compute_bounds(X)
+
+    draw_dt_edges_by_class(ax, X, y, tri, lw_same=1.2, lw_cross=0.8)
+    draw_decision_boundaries(ax, X, y, (xlim[0], xlim[1]), (xlim[2], xlim[3]))
+    k = draw_srr_grid(ax, X, (xlim[0], xlim[1]), (xlim[2], xlim[3]))
+    draw_points(ax, X, y)
+
+    ax.set_xlim(xlim[0], xlim[1])
+    ax.set_ylim(xlim[2], xlim[3])
+    ax.set_title(f'{name} — (d) Decision Boundaries + '
+                 f'SRR Grid ({k}x{k})',
+                 fontsize=11, fontweight='bold')
+    save_fig(fig, f'{out_dir}/4_decision_boundaries.png')
 
 
-# =============================================================================
-# FIGURE 5: SRR Grid Visualization
-# =============================================================================
-def fig_srr_grid(X, y, title, save_path):
-    """SRR grid overlay on triangulation."""
-    fig, ax = plt.subplots(figsize=(6, 5))
-    
-    # Build triangulation
-    outlier_mask = identify_outliers(X, y, k=3)
-    X_clean = X[~outlier_mask]
-    y_clean = y[~outlier_mask]
-    
-    if len(X_clean) < 4:
-        X_clean, y_clean = X, y
-    
-    try:
-        tri = Delaunay(X_clean)
-    except:
+def fig_5_srr_grid(X, y, name, out_dir):
+    """Figure 5: SRR grid overlay on DT (dashed edges)."""
+    if len(X) < 3:
         return
-    
-    # Draw triangulation
-    edges = set()
-    for simplex in tri.simplices:
-        for i in range(3):
-            edge = tuple(sorted([simplex[i], simplex[(i+1) % 3]]))
-            edges.add(edge)
-    
-    lines = [[X_clean[e[0]], X_clean[e[1]]] for e in edges]
-    lc = LineCollection(lines, colors='lightgray', linewidths=0.3, alpha=0.5)
-    ax.add_collection(lc)
-    
-    # Draw SRR grid
-    srr = create_srr_grid(X_clean)
-    for i in range(srr['n_buckets'] + 1):
-        # Vertical lines
-        x = srr['x_min'] + i * srr['step_x']
-        ax.axvline(x, color='blue', linewidth=0.5, alpha=0.4, linestyle='--')
-        # Horizontal lines
-        y_pos = srr['y_min'] + i * srr['step_y']
-        ax.axhline(y_pos, color='blue', linewidth=0.5, alpha=0.4, linestyle='--')
-    
-    # Draw points
-    n_classes = len(np.unique(y_clean))
-    ax.scatter(X_clean[:, 0], X_clean[:, 1], c=y_clean, cmap=CMAP_CLASSES, 
-               s=20, alpha=0.9, edgecolors='black', linewidths=0.3, zorder=5)
-    
-    ax.set_xlabel('X')
-    ax.set_ylabel('Y')
-    ax.set_title(f'{title}: SRR Grid ({srr["n_buckets"]}×{srr["n_buckets"]} buckets)')
-    
-    ax.set_xlim(srr['x_min'], srr['x_max'])
-    ax.set_ylim(srr['y_min'], srr['y_max'])
-    ax.set_aspect('equal', adjustable='box')
-    plt.tight_layout()
-    plt.savefig(save_path)
-    plt.close()
-    print(f"  Saved: {save_path}")
+
+    fig, ax = create_figure()
+    tri = Delaunay(X)
+    xlim = compute_bounds(X)
+
+    draw_dt_edges_uniform(ax, X, tri, color='#CC0000', lw=0.8, ls='--')
+    k = draw_srr_grid(ax, X, (xlim[0], xlim[1]), (xlim[2], xlim[3]))
+    draw_points(ax, X, y)
+
+    ax.set_xlim(xlim[0], xlim[1])
+    ax.set_ylim(xlim[2], xlim[3])
+    n_cls = len(np.unique(y))
+    make_legend(ax, n_cls)
+    ax.set_title(f'{name} — (e) SRR Grid ({k}x{k} = {k*k} buckets)',
+                 fontsize=12, fontweight='bold')
+    save_fig(fig, f'{out_dir}/5_srr_grid.png')
 
 
-# =============================================================================
-# FIGURE 6: Dynamic Update Illustration
-# =============================================================================
-def fig_dynamic_update(X, y, title, save_path):
-    """Before/after dynamic point insertion."""
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
-    
-    outlier_mask = identify_outliers(X, y, k=3)
-    X_clean = X[~outlier_mask]
-    y_clean = y[~outlier_mask]
-    
-    if len(X_clean) < 10:
-        X_clean, y_clean = X, y
-    
-    # Remove some points to simulate "before"
-    n_remove = min(5, len(X_clean) // 10)
-    indices_to_remove = np.random.choice(len(X_clean), n_remove, replace=False)
-    mask = np.ones(len(X_clean), dtype=bool)
-    mask[indices_to_remove] = False
-    
-    X_before = X_clean[mask]
-    y_before = y_clean[mask]
-    X_new = X_clean[~mask]
-    y_new = y_clean[~mask]
-    
-    # Before
+def fig_6_dynamic_update(X_base, y_base, X_stream, y_stream, name, out_dir):
+    """Figure 6: Dynamic insertion — before/after with DT update."""
+    if len(X_base) < 3:
+        return
+
+    n_insert = min(5, len(X_stream))
+    X_new = X_stream[:n_insert]
+    y_new = y_stream[:n_insert]
+
+    X_combined = np.vstack([X_base, X_new])
+    y_combined = np.hstack([y_base, y_new])
+    xlim = compute_bounds(X_combined)
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6), facecolor=BG_COLOR)
+
+    # Panel (a): Before insertion
     ax = axes[0]
-    try:
-        tri_before = Delaunay(X_before)
-        edges = set()
-        for simplex in tri_before.simplices:
-            for i in range(3):
-                edge = tuple(sorted([simplex[i], simplex[(i+1) % 3]]))
-                edges.add(edge)
-        lines = [[X_before[e[0]], X_before[e[1]]] for e in edges]
-        lc = LineCollection(lines, colors='gray', linewidths=0.3, alpha=0.5)
-        ax.add_collection(lc)
-    except:
-        pass
-    
-    ax.scatter(X_before[:, 0], X_before[:, 1], c=y_before, cmap=CMAP_CLASSES, 
-               s=20, edgecolors='black', linewidths=0.3)
-    ax.set_xlabel('X')
-    ax.set_ylabel('Y')
-    ax.set_title(f'Before: {len(X_before)} points')
-    ax.set_aspect('equal', adjustable='box')
-    ax.autoscale_view()
-    
-    # After (with new points)
+    ax.set_facecolor(BG_COLOR)
+    ax.set_aspect('equal', adjustable='datalim')
+    for spine in ax.spines.values():
+        spine.set_color('black')
+        spine.set_linewidth(2)
+    ax.set_xticks([])
+    ax.set_yticks([])
+
+    tri_before = Delaunay(X_base)
+    draw_dt_edges_by_class(ax, X_base, y_base, tri_before)
+    draw_points(ax, X_base, y_base)
+    ax.set_xlim(xlim[0], xlim[1])
+    ax.set_ylim(xlim[2], xlim[3])
+    ax.set_title(f'(a) Before: {len(X_base)} points',
+                 fontsize=12, fontweight='bold')
+
+    # Panel (b): After insertion
     ax = axes[1]
-    try:
-        tri_after = Delaunay(X_clean)
-        edges = set()
-        for simplex in tri_after.simplices:
-            for i in range(3):
-                edge = tuple(sorted([simplex[i], simplex[(i+1) % 3]]))
-                edges.add(edge)
-        lines = [[X_clean[e[0]], X_clean[e[1]]] for e in edges]
-        lc = LineCollection(lines, colors='gray', linewidths=0.3, alpha=0.5)
-        ax.add_collection(lc)
-    except:
-        pass
-    
-    ax.scatter(X_before[:, 0], X_before[:, 1], c=y_before, cmap=CMAP_CLASSES, 
-               s=20, edgecolors='black', linewidths=0.3)
-    ax.scatter(X_new[:, 0], X_new[:, 1], c='lime', 
-               s=80, marker='*', edgecolors='black', linewidths=0.5, 
-               label=f'New points ({len(X_new)})', zorder=10)
-    ax.set_xlabel('X')
-    ax.set_ylabel('Y')
-    ax.set_title(f'After: {len(X_clean)} points\nO(1) insertion per point')
-    ax.legend(loc='best')
-    ax.set_aspect('equal', adjustable='box')
-    ax.autoscale_view()
-    
-    fig.suptitle(f'{title}: Dynamic Update (O(1) Insert)', fontsize=12, y=1.02)
+    ax.set_facecolor(BG_COLOR)
+    ax.set_aspect('equal', adjustable='datalim')
+    for spine in ax.spines.values():
+        spine.set_color('black')
+        spine.set_linewidth(2)
+    ax.set_xticks([])
+    ax.set_yticks([])
+
+    tri_after = Delaunay(X_combined)
+    draw_dt_edges_by_class(ax, X_combined, y_combined, tri_after)
+    draw_points(ax, X_base, y_base)
+
+    # Highlight new points with magenta ring
+    for i in range(n_insert):
+        label = y_new[i]
+        color = CLASS_COLORS[label % len(CLASS_COLORS)]
+        marker = MARKERS[label % len(MARKERS)]
+        ax.scatter(X_new[i, 0], X_new[i, 1], c=color, marker=marker,
+                   s=MARKER_SIZE * 1.5, edgecolors='black', linewidths=1.5,
+                   zorder=6)
+        ax.scatter(X_new[i, 0], X_new[i, 1], facecolors='none',
+                   edgecolors='#FF00FF', s=MARKER_SIZE * 3,
+                   linewidths=2, zorder=7)
+
+    ax.set_xlim(xlim[0], xlim[1])
+    ax.set_ylim(xlim[2], xlim[3])
+    ax.set_title(f'(b) After: +{n_insert} points inserted (O(1) each)',
+                 fontsize=12, fontweight='bold')
+
+    fig.suptitle(f'{name} — Dynamic Update', fontsize=14, fontweight='bold',
+                 y=1.02)
     plt.tight_layout()
-    plt.savefig(save_path)
-    plt.close()
-    print(f"  Saved: {save_path}")
+    save_fig(fig, f'{out_dir}/6_dynamic_update.png')
+
+
+def fig_7_query_classification(X, y, X_stream, y_stream, name, out_dir):
+    """Figure 7: Query classification via 2D Buckets — DT unchanged."""
+    if len(X) < 3:
+        return
+
+    fig, ax = create_figure()
+    tri = Delaunay(X)
+    xlim = compute_bounds(X)
+
+    draw_dt_edges_by_class(ax, X, y, tri, lw_same=1.0, lw_cross=0.7)
+    draw_decision_boundaries(ax, X, y, (xlim[0], xlim[1]), (xlim[2], xlim[3]),
+                             lw=2.0)
+    draw_srr_grid(ax, X, (xlim[0], xlim[1]), (xlim[2], xlim[3]))
+    draw_points(ax, X, y)
+
+    # Query points (red stars with predicted class annotation)
+    n_queries = min(3, len(X_stream))
+    for i in range(n_queries):
+        qx, qy = X_stream[i]
+        # Classify by nearest vertex
+        dists = np.sum((X - np.array([qx, qy])) ** 2, axis=1)
+        pred = y[np.argmin(dists)]
+        pred_color = CLASS_COLORS[pred % len(CLASS_COLORS)]
+
+        ax.scatter(qx, qy, c='red', marker='*', s=200, edgecolors='black',
+                   linewidths=1.5, zorder=10)
+        rx = (xlim[1] - xlim[0])
+        ax.annotate(f'Class {pred}', (qx, qy),
+                    xytext=(qx + 0.05 * rx, qy + 0.05 * rx),
+                    fontsize=9, fontweight='bold', color=pred_color,
+                    bbox=dict(boxstyle='round', facecolor='white', alpha=0.8),
+                    zorder=11)
+
+    ax.set_xlim(xlim[0], xlim[1])
+    ax.set_ylim(xlim[2], xlim[3])
+    ax.set_title(f'{name} — Query Classification (DT unchanged)',
+                 fontsize=11, fontweight='bold')
+    save_fig(fig, f'{out_dir}/7_query_classification.png')
 
 
 # =============================================================================
-# SUMMARY FIGURES (Comparison Charts)
+# SUMMARY COMPARISON CHARTS
 # =============================================================================
-def fig_accuracy_comparison(results_csv, save_path):
-    """Bar chart comparing accuracy across algorithms."""
-    df = pd.read_csv(results_csv)
-    
-    # Pivot for plotting
+
+def read_benchmark_csv(csv_path):
+    """Read cpp_benchmark CSV robustly, handling commas in method names.
+
+    The CSV has columns: method,accuracy,avg_inference_us,train_time_ms,speedup_vs_knn
+    Method names like 'LibSVM C++ (RBF, adaptive)' contain embedded commas,
+    so we parse the last 4 fields as numeric and join the rest as method.
+    """
+    rows = []
+    with open(csv_path) as f:
+        header = f.readline().strip().split(',')
+        for line in f:
+            parts = line.strip().split(',')
+            # Last 4 fields are always numeric
+            numeric = parts[-4:]
+            method = ','.join(parts[:-4])
+            rows.append({
+                'method': method,
+                'accuracy': float(numeric[0]),
+                'avg_inference_us': float(numeric[1]),
+                'train_time_ms': float(numeric[2]),
+                'speedup_vs_knn': float(numeric[3]),
+            })
+    return pd.DataFrame(rows)
+
+
+def chart_accuracy_comparison(root_dir, figures_dir):
+    """Bar chart comparing accuracy across all datasets and algorithms."""
+    results = []
+    for ds in ALL_DATASETS:
+        csv_path = f'{root_dir}/results/cpp_benchmark_{ds}.csv'
+        if os.path.exists(csv_path):
+            df = read_benchmark_csv(csv_path)
+            for _, row in df.iterrows():
+                results.append({
+                    'dataset': ds,
+                    'method': row['method'].replace('**', '').strip(),
+                    'accuracy': row['accuracy'] * 100
+                })
+
+    if not results:
+        print("  No benchmark CSVs found. Run benchmarks first.")
+        return
+
+    df = pd.DataFrame(results)
+    methods = df['method'].unique()
     datasets = df['dataset'].unique()
-    algorithms = ['Delaunay', 'KNN', 'SVM', 'DecisionTree', 'RandomForest']
-    
-    fig, ax = plt.subplots(figsize=(12, 5))
-    
+
+    fig, ax = plt.subplots(figsize=(14, 5))
     x = np.arange(len(datasets))
-    width = 0.15
-    
-    colors = ['#2ca02c', '#1f77b4', '#ff7f0e', '#d62728', '#9467bd']
-    
-    for i, algo in enumerate(algorithms):
-        if algo in df.columns or f'{algo}_mean' in df.columns:
-            col = f'{algo}_mean' if f'{algo}_mean' in df.columns else algo
-            if col in df.columns:
-                values = df.groupby('dataset')[col].first().reindex(datasets).fillna(0)
-                ax.bar(x + i * width, values * 100, width, label=algo, color=colors[i])
-    
-    ax.set_xlabel('Dataset')
-    ax.set_ylabel('Accuracy (%)')
-    ax.set_title('Classification Accuracy Comparison (10-Fold CV)')
-    ax.set_xticks(x + width * 2)
-    ax.set_xticklabels(datasets, rotation=45, ha='right')
-    ax.legend(loc='lower right')
+    width = 0.8 / len(methods)
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']
+
+    for i, method in enumerate(methods):
+        vals = []
+        for ds in datasets:
+            sub = df[(df['dataset'] == ds) & (df['method'] == method)]
+            vals.append(sub['accuracy'].values[0] if len(sub) > 0 else 0)
+        label = method.split('(')[0].strip() if '(' in method else method
+        ax.bar(x + i * width, vals, width, label=label,
+               color=colors[i % len(colors)], edgecolor='black', linewidth=0.3)
+
+    ax.set_xlabel('Dataset', fontsize=11)
+    ax.set_ylabel('Accuracy (%)', fontsize=11)
+    ax.set_title('Classification Accuracy Comparison', fontsize=13,
+                 fontweight='bold')
+    ax.set_xticks(x + width * (len(methods) - 1) / 2)
+    ax.set_xticklabels([DATASET_NAMES.get(d, d) for d in datasets],
+                       rotation=45, ha='right', fontsize=9)
+    ax.legend(loc='lower right', fontsize=8)
     ax.set_ylim(0, 105)
     ax.grid(axis='y', alpha=0.3)
-    
     plt.tight_layout()
-    plt.savefig(save_path)
-    plt.close()
-    print(f"  Saved: {save_path}")
+    save_fig(fig, f'{figures_dir}/summary_accuracy.png')
 
 
-def fig_scalability_combined(save_path, root_dir):
-    """Combined scalability plot (training + inference) from actual data."""
-    # Try to read from scalability CSV files
-    scalability_train_path = os.path.join(root_dir, 'results', 'scalability_train.csv')
-    scalability_infer_path = os.path.join(root_dir, 'results', 'scalability_inference.csv')
-    
-    if os.path.exists(scalability_train_path) and os.path.exists(scalability_infer_path):
-        # Read actual data
-        train_df = pd.read_csv(scalability_train_path)
-        infer_df = pd.read_csv(scalability_infer_path)
-        n_points = train_df['n'].tolist()
-        train_time = train_df['time_s'].tolist()
-        inference_time = infer_df['time_us'].tolist()
-    else:
-        # Generate theoretical curves if no data available
-        print("  Warning: Using theoretical curves (run scalability_test.py for actual data)")
-        n_points = [100, 500, 1000, 5000, 10000, 50000, 100000]
-        train_time = [0.005 * n * np.log2(n) / 1000 for n in n_points]
-        inference_time = [0.2] * len(n_points)
-    
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
-    
-    # Training time
-    ax = axes[0]
-    ax.loglog(n_points, train_time, 'o-', color='#1f77b4', linewidth=2, markersize=6)
-    ax.set_xlabel('Number of Training Points (n)')
-    ax.set_ylabel('Training Time (seconds)')
-    ax.set_title('Training Complexity: O(n log n)')
-    ax.grid(True, alpha=0.3)
-    
-    # Add reference line
-    ref_nlogn = [n * np.log2(n) / (n_points[0] * np.log2(n_points[0])) * train_time[0] 
-                 for n in n_points]
-    ax.loglog(n_points, ref_nlogn, '--', color='gray', alpha=0.5, label='O(n log n) reference')
-    ax.legend()
-    
-    # Inference time
-    ax = axes[1]
-    ax.semilogx(n_points, inference_time, 's-', color='#2ca02c', linewidth=2, markersize=6)
-    ax.set_xlabel('Number of Training Points (n)')
-    ax.set_ylabel('Inference Time (µs)')
-    ax.set_title('Inference Complexity: O(1) with SRR')
-    ax.set_ylim(0, max(inference_time) * 1.5 if inference_time else 2)
-    ax.grid(True, alpha=0.3)
-    ax.axhline(y=np.mean(inference_time), color='gray', linestyle='--', alpha=0.5, label='O(1) constant')
-    ax.legend()
-    
-    plt.tight_layout()
-    plt.savefig(save_path)
-    plt.close()
-    print(f"  Saved: {save_path}")
-
-
-def fig_speedup_comparison(save_path, root_dir):
-    """Speedup comparison bar chart from actual benchmark CSV files."""
-    # Read speedups from actual C++ benchmark results
-    datasets = []
+def chart_speedup_comparison(root_dir, figures_dir):
+    """Bar chart showing speedup vs KNN for each dataset."""
+    datasets_found = []
     speedups = []
-    
-    for ds in ['spiral', 'circles', 'checkerboard', 'earthquake', 'moons', 'blobs']:
-        csv_path = os.path.join(root_dir, 'results', f'cpp_benchmark_{ds}.csv')
-        if os.path.exists(csv_path):
-            df = pd.read_csv(csv_path)
-            # Find Delaunay speedup
-            delaunay_row = df[df['method'].str.contains('Delaunay', case=False, na=False)]
-            if not delaunay_row.empty and 'speedup_vs_knn' in df.columns:
-                speedup = delaunay_row['speedup_vs_knn'].values[0]
-                datasets.append(ds.capitalize())
-                speedups.append(speedup)
-    
-    if not datasets:
-        print("  Warning: No benchmark CSVs found. Run ./build/benchmark first.")
+
+    for ds in ALL_DATASETS:
+        csv_path = f'{root_dir}/results/cpp_benchmark_{ds}.csv'
+        if not os.path.exists(csv_path):
+            continue
+        df = read_benchmark_csv(csv_path)
+        row = df[df['method'].str.contains('Delaunay', case=False, na=False)]
+        if not row.empty and 'speedup_vs_knn' in df.columns:
+            speedups.append(row['speedup_vs_knn'].values[0])
+            datasets_found.append(DATASET_NAMES.get(ds, ds))
+
+    if not datasets_found:
+        print("  No speedup data found.")
         return
-    
-    fig, ax = plt.subplots(figsize=(8, 4))
-    
-    colors = ['#2ca02c' if s >= 20 else '#ff7f0e' for s in speedups]
-    bars = ax.bar(datasets, speedups, color=colors, edgecolor='black', linewidth=0.5)
-    
-    ax.set_xlabel('Dataset')
-    ax.set_ylabel('Speedup (× faster than KNN)')
-    ax.set_title('Inference Speed Improvement vs FLANN KNN (from C++ benchmarks)')
-    ax.axhline(y=1, color='gray', linestyle='--', alpha=0.5)
-    
-    # Add value labels on bars
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    colors = ['#2ca02c' if s >= 1000 else '#ff7f0e' for s in speedups]
+    bars = ax.bar(datasets_found, speedups, color=colors,
+                  edgecolor='black', linewidth=0.5)
+
     for bar, s in zip(bars, speedups):
-        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.5, 
-                f'{s:.1f}×', ha='center', va='bottom', fontsize=9)
-    
-    ax.set_ylim(0, max(speedups) * 1.15)
-    ax.grid(axis='y', alpha=0.3)
-    
-    plt.tight_layout()
-    plt.savefig(save_path)
-    plt.close()
-    print(f"  Saved: {save_path}")
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
+                f'{s:.0f}x', ha='center', va='bottom', fontsize=8)
 
-
-def fig_dynamic_update_comparison(save_path, root_dir):
-    """Dynamic update time comparison from actual benchmark results."""
-    # Try to read from dynamic logs
-    log_dir = os.path.join(root_dir, 'results', 'logs')
-    
-    insert_times = []
-    delete_times = []
-    
-    for ds in ['wine', 'moons', 'blobs', 'earthquake']:
-        log_path = os.path.join(log_dir, f'{ds}_dynamic_logs.csv')
-        if os.path.exists(log_path):
-            df = pd.read_csv(log_path)
-            if 'operation' in df.columns and 'time_ns' in df.columns:
-                ins = df[df['operation'] == 'insert']['time_ns'].mean()
-                dlt = df[df['operation'] == 'delete']['time_ns'].mean()
-                if not np.isnan(ins):
-                    insert_times.append(ins)
-                if not np.isnan(dlt):
-                    delete_times.append(dlt)
-    
-    if insert_times:
-        avg_insert_ns = np.mean(insert_times)
-        avg_delete_ns = np.mean(delete_times) if delete_times else avg_insert_ns * 5
-    else:
-        print("  Warning: No dynamic logs found. Using estimates.")
-        avg_insert_ns = 1000  # 1 µs estimate
-        avg_delete_ns = 5000  # 5 µs estimate
-    
-    # Decision Tree rebuild typically takes ~1-10ms depending on dataset size
-    dt_rebuild_ns = 5_000_000  # 5ms estimate (will be replaced with actual if available)
-    
-    operations = ['Insert (1 point)', 'Delete (1 point)']
-    delaunay_times = [avg_insert_ns / 1e6, avg_delete_ns / 1e6]  # Convert to ms
-    dt_rebuild_times = [dt_rebuild_ns / 1e6, dt_rebuild_ns / 1e6]  # ms
-    
-    fig, ax = plt.subplots(figsize=(7, 4))
-    
-    x = np.arange(len(operations))
-    width = 0.35
-    
-    bars1 = ax.bar(x - width/2, delaunay_times, width, label='Delaunay (Ours)', 
-                   color='#2ca02c', edgecolor='black')
-    bars2 = ax.bar(x + width/2, dt_rebuild_times, width, label='Decision Tree (Rebuild)', 
-                   color='#d62728', edgecolor='black')
-    
-    ax.set_xlabel('Operation')
-    ax.set_ylabel('Time (ms) - Log Scale')
-    ax.set_title('Dynamic Update Performance')
-    ax.set_xticks(x)
-    ax.set_xticklabels(operations)
-    ax.legend()
+    ax.set_xlabel('Dataset', fontsize=11)
+    ax.set_ylabel('Speedup vs KNN', fontsize=11)
+    ax.set_title('Inference Speedup: Delaunay vs FLANN KNN',
+                 fontsize=13, fontweight='bold')
     ax.set_yscale('log')
     ax.grid(axis='y', alpha=0.3)
-    
-    # Add speedup annotations
-    for i, (d, r) in enumerate(zip(delaunay_times, dt_rebuild_times)):
-        if d > 0:
-            speedup = r / d
-            ax.annotate(f'{speedup:.0f}× faster', 
-                        xy=(i - width/2, d), 
-                        xytext=(i - width/2, d * 5),
-                        ha='center', fontsize=9,
-                        arrowprops=dict(arrowstyle='->', color='gray', lw=0.5))
-    
+    plt.xticks(rotation=45, ha='right', fontsize=9)
     plt.tight_layout()
-    plt.savefig(save_path)
-    plt.close()
-    print(f"  Saved: {save_path}")
+    save_fig(fig, f'{figures_dir}/summary_speedup.png')
 
 
-# =============================================================================
-# MAIN GENERATION FUNCTION
-# =============================================================================
-def generate_all_figures(root_dir):
-    """Generate all publication figures."""
-    
-    figures_dir = os.path.join(root_dir, 'figures')
-    os.makedirs(figures_dir, exist_ok=True)
-    
-    # Dataset configurations
-    datasets = {
-        'wine': 'Wine',
-        'cancer': 'Breast Cancer', 
-        'iris': 'Iris',
-        'digits': 'Digits',
-        'moons': 'Moons',
-        'blobs': 'Blobs',
-        'spiral': 'Spiral',
-        'circles': 'Circles',
-        'checkerboard': 'Checkerboard',
-        'earthquake': 'USGS Earthquake',
-        'bloodmnist': 'BloodMNIST'
-    }
-    
-    print("="*70)
-    print("GENERATING PUBLICATION-READY FIGURES")
-    print("="*70)
-    
-    for dataset_key, dataset_name in datasets.items():
-        train_path = os.path.join(root_dir, f'data/train/{dataset_key}_train.csv')
-        test_path = os.path.join(root_dir, f'data/test/{dataset_key}_test_y.csv')
-        
-        if not os.path.exists(train_path):
-            print(f"\n[SKIP] {dataset_name}: No training data found")
+def chart_dynamic_comparison(root_dir, figures_dir):
+    """Grouped bar chart: dynamic insert/move/delete vs DT rebuild."""
+    datasets_found = []
+    dt_rebuilds = []
+    our_inserts = []
+    our_moves = []
+    our_deletes = []
+
+    for ds in ALL_DATASETS:
+        csv_path = f'{root_dir}/results/cpp_benchmark_{ds}.csv'
+        if not os.path.exists(csv_path):
             continue
-        
-        print(f"\n[{dataset_name}]")
-        print("-" * 40)
-        
-        X_train, y_train, X_test, y_test = load_dataset(train_path, test_path)
-        
-        dataset_dir = os.path.join(figures_dir, dataset_key)
-        os.makedirs(dataset_dir, exist_ok=True)
-        
-        # 1. Raw dataset
-        fig_raw_dataset(X_train, y_train, dataset_name, 
-                        os.path.join(dataset_dir, '1_raw_dataset.png'))
-        
-        # 2. Delaunay triangulation
-        fig_delaunay_triangulation(X_train, y_train, dataset_name,
-                                    os.path.join(dataset_dir, '2_delaunay_triangulation.png'))
-        
-        # 3. Outlier removal
-        fig_outlier_removal(X_train, y_train, dataset_name,
-                            os.path.join(dataset_dir, '3_outlier_removal.png'))
-        
-        # 4. Decision boundary
-        fig_decision_boundary(X_train, y_train, dataset_name,
-                              os.path.join(dataset_dir, '4_decision_boundary.png'))
-        
-        # 5. SRR grid
-        fig_srr_grid(X_train, y_train, dataset_name,
-                     os.path.join(dataset_dir, '5_srr_grid.png'))
-        
-        # 6. Dynamic update
-        fig_dynamic_update(X_train, y_train, dataset_name,
-                           os.path.join(dataset_dir, '6_dynamic_update.png'))
-    
-    # Summary figures
-    print("\n[SUMMARY FIGURES]")
-    print("-" * 40)
-    
-    fig_scalability_combined(os.path.join(figures_dir, 'summary_scalability.png'), root_dir)
-    fig_speedup_comparison(os.path.join(figures_dir, 'summary_speedup.png'), root_dir)
-    fig_dynamic_update_comparison(os.path.join(figures_dir, 'summary_dynamic_updates.png'), root_dir)
-    
-    print("\n" + "="*70)
-    print("FIGURE GENERATION COMPLETE!")
-    print(f"All figures saved to: {figures_dir}")
-    print("="*70)
+
+        # Dynamic results are printed in stdout, not CSV, so read from
+        # ablation_dynamic_ CSVs instead
+        dyn_csv = f'{root_dir}/results/ablation_dynamic_{ds}.csv'
+        if os.path.exists(dyn_csv):
+            df = pd.read_csv(dyn_csv)
+            if len(df) > 0:
+                row = df.iloc[0]
+                datasets_found.append(DATASET_NAMES.get(ds, ds))
+                our_inserts.append(row['avg_insert_ns'] / 1e6)
+                our_moves.append(row['avg_move_ns'] / 1e6)
+                our_deletes.append(row['avg_delete_ns'] / 1e6)
+
+    if not datasets_found:
+        print("  No dynamic ablation data found.")
+        return
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+    x = np.arange(len(datasets_found))
+    width = 0.25
+
+    ax.bar(x - width, our_inserts, width, label='Insert', color='#2ca02c',
+           edgecolor='black', linewidth=0.3)
+    ax.bar(x, our_moves, width, label='Move', color='#ff7f0e',
+           edgecolor='black', linewidth=0.3)
+    ax.bar(x + width, our_deletes, width, label='Delete', color='#1f77b4',
+           edgecolor='black', linewidth=0.3)
+
+    ax.set_xlabel('Dataset', fontsize=11)
+    ax.set_ylabel('Time (ms)', fontsize=11)
+    ax.set_title('Dynamic Update Performance (Insert / Move / Delete)',
+                 fontsize=13, fontweight='bold')
+    ax.set_xticks(x)
+    ax.set_xticklabels(datasets_found, rotation=45, ha='right', fontsize=9)
+    ax.legend(fontsize=9)
+    ax.grid(axis='y', alpha=0.3)
+    plt.tight_layout()
+    save_fig(fig, f'{figures_dir}/summary_dynamic.png')
+
+
+def chart_scalability(root_dir, figures_dir):
+    """Two-panel plot: O(n log n) training + O(1) inference."""
+    train_csv = f'{root_dir}/results/scalability_train.csv'
+    infer_csv = f'{root_dir}/results/scalability_inference.csv'
+
+    if not os.path.exists(train_csv) or not os.path.exists(infer_csv):
+        print("  No scalability CSVs found. Run scalability_test.py first.")
+        return
+
+    df_t = pd.read_csv(train_csv)
+    df_i = pd.read_csv(infer_csv)
+
+    # Determine column names (handle both old and new formats)
+    n_col = 'n'
+    t_col = 'time_s' if 'time_s' in df_t.columns else 'train_time_ms'
+    i_col = 'time_us' if 'time_us' in df_i.columns else 'inference_us'
+
+    n_vals = df_t[n_col].values
+    t_vals = df_t[t_col].values
+    i_vals = df_i[i_col].values
+
+    # Convert ms to s if needed
+    if t_col == 'train_time_ms':
+        t_vals = t_vals / 1000.0
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+
+    # Training
+    ax = axes[0]
+    ax.loglog(n_vals, t_vals, 'bo-', linewidth=2, markersize=7,
+              label='Measured')
+    c = t_vals[0] / (n_vals[0] * np.log2(n_vals[0]))
+    ref = c * n_vals * np.log2(n_vals.astype(float))
+    ax.loglog(n_vals, ref, 'r--', linewidth=1.5, alpha=0.6,
+              label='O(n log n) reference')
+    ax.set_xlabel('Training points (n)', fontsize=11)
+    ax.set_ylabel('Training time (s)', fontsize=11)
+    ax.set_title('Training Complexity', fontsize=13, fontweight='bold')
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3)
+
+    # Inference
+    ax = axes[1]
+    ax.semilogx(n_vals, i_vals, 'gs-', linewidth=2, markersize=7,
+                label='Measured')
+    mean_i = np.mean(i_vals)
+    ax.axhline(y=mean_i, color='r', linestyle='--', linewidth=1.5, alpha=0.6,
+               label=f'O(1) mean = {mean_i:.3f} us')
+    ax.set_xlabel('Training points (n)', fontsize=11)
+    ax.set_ylabel('Inference time (us/point)', fontsize=11)
+    ax.set_title('Inference Complexity: O(1) via 2D Buckets',
+                 fontsize=13, fontweight='bold')
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3)
+    ax.set_ylim(0, max(i_vals) * 2 if len(i_vals) > 0 else 1)
+
+    plt.tight_layout()
+    save_fig(fig, f'{figures_dir}/summary_scalability.png')
+
+
+def chart_ablation_accuracy(root_dir, figures_dir):
+    """Grouped bar chart showing ablation accuracy impact."""
+    summary_csv = f'{root_dir}/results/ablation_summary.csv'
+    if not os.path.exists(summary_csv):
+        print("  No ablation_summary.csv found. Run ablation_study.py first.")
+        return
+
+    df = pd.read_csv(summary_csv)
+
+    # Filter to main ablation variants
+    variants = ['Full Pipeline', 'Without SRR Grid',
+                'Without Outlier Removal', 'Nearest Vertex Only']
+    variant_labels = ['Full\nPipeline', 'No 2D\nBuckets',
+                      'No Outlier\nRemoval', 'Nearest\nVertex']
+
+    datasets = df['dataset'].unique()
+    fig, ax = plt.subplots(figsize=(12, 5))
+    x = np.arange(len(datasets))
+    width = 0.8 / len(variants)
+    colors = ['#2ca02c', '#1f77b4', '#ff7f0e', '#d62728']
+
+    for i, (var, label) in enumerate(zip(variants, variant_labels)):
+        vals = []
+        for ds in datasets:
+            sub = df[(df['dataset'] == ds) &
+                     (df['variant'].str.contains(var.split()[0], na=False))]
+            if len(sub) > 0:
+                vals.append(sub['accuracy'].values[0] * 100)
+            else:
+                vals.append(0)
+        ax.bar(x + i * width, vals, width, label=label,
+               color=colors[i], edgecolor='black', linewidth=0.3)
+
+    ax.set_xlabel('Dataset', fontsize=11)
+    ax.set_ylabel('Accuracy (%)', fontsize=11)
+    ax.set_title('Ablation Study: Component Contribution',
+                 fontsize=13, fontweight='bold')
+    ax.set_xticks(x + width * 1.5)
+    ax.set_xticklabels([DATASET_NAMES.get(d, d) for d in datasets],
+                       rotation=45, ha='right', fontsize=9)
+    ax.legend(fontsize=8, ncol=2)
+    ax.set_ylim(0, 105)
+    ax.grid(axis='y', alpha=0.3)
+    plt.tight_layout()
+    save_fig(fig, f'{figures_dir}/summary_ablation.png')
+
+
+# =============================================================================
+# MAIN ORCHESTRATOR
+# =============================================================================
+
+def generate_dataset_figures(ds_key, root_dir, figures_dir):
+    """Generate all pipeline figures for a single dataset."""
+    name = DATASET_NAMES.get(ds_key, ds_key)
+    out_dir = f'{figures_dir}/{ds_key}'
+    os.makedirs(out_dir, exist_ok=True)
+
+    train_path = f'{root_dir}/data/train/{ds_key}_train.csv'
+    test_path = f'{root_dir}/data/test/{ds_key}_test_y.csv'
+    base_path = f'{root_dir}/data/train/{ds_key}_dynamic_base.csv'
+    stream_path = f'{root_dir}/data/train/{ds_key}_dynamic_stream.csv'
+
+    X_train, y_train = load_csv(train_path)
+    if X_train is None:
+        print(f"  [SKIP] {name}: training data not found")
+        return
+
+    print(f"\n  [{name}] ({len(X_train)} points, "
+          f"{len(np.unique(y_train))} classes)")
+
+    # Fig 1: Raw data
+    fig_1_raw_data(X_train, y_train, name, out_dir)
+
+    # Fig 2: Delaunay triangulation
+    fig_2_delaunay_triangulation(X_train, y_train, name, out_dir)
+
+    # Fig 3: Outlier removal (returns clean data)
+    X_clean, y_clean = fig_3_outlier_removal(
+        X_train, y_train, name, out_dir)
+
+    # Fig 4: Decision boundaries + SRR grid (on clean data)
+    fig_4_decision_boundaries(X_clean, y_clean, name, out_dir)
+
+    # Fig 5: SRR grid overlay
+    fig_5_srr_grid(X_clean, y_clean, name, out_dir)
+
+    # Fig 6 & 7: Dynamic update and query classification
+    X_base, y_base = load_csv(base_path)
+    X_stream, y_stream = load_csv(stream_path)
+
+    if X_base is not None and X_stream is not None:
+        fig_6_dynamic_update(X_base, y_base, X_stream, y_stream,
+                             name, out_dir)
+        fig_7_query_classification(X_clean, y_clean, X_stream, y_stream,
+                                   name, out_dir)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Generate publication figures for "
+                    "Delaunay Triangulation Classifier")
+    parser.add_argument('--datasets', default='all',
+                        help='Comma-separated dataset names or "all"')
+    parser.add_argument('--summary-only', action='store_true',
+                        help='Generate only summary charts (no per-dataset)')
+    args = parser.parse_args()
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    root_dir = os.path.abspath(os.path.join(script_dir, ".."))
+    figures_dir = f'{root_dir}/figures'
+    os.makedirs(figures_dir, exist_ok=True)
+
+    if args.datasets == 'all':
+        datasets = ALL_DATASETS
+    else:
+        datasets = [d.strip() for d in args.datasets.split(',')]
+
+    np.random.seed(42)
+
+    print("=" * 70)
+    print("PUBLICATION FIGURE GENERATOR")
+    print(f"Output: {figures_dir}")
+    print("=" * 70)
+
+    # Per-dataset pipeline figures
+    if not args.summary_only:
+        for ds in datasets:
+            generate_dataset_figures(ds, root_dir, figures_dir)
+
+    # Summary comparison charts
+    print("\n  [SUMMARY CHARTS]")
+    chart_accuracy_comparison(root_dir, figures_dir)
+    chart_speedup_comparison(root_dir, figures_dir)
+    chart_dynamic_comparison(root_dir, figures_dir)
+    chart_scalability(root_dir, figures_dir)
+    chart_ablation_accuracy(root_dir, figures_dir)
+
+    print("\n" + "=" * 70)
+    print("FIGURE GENERATION COMPLETE")
+    print(f"Output: {figures_dir}")
+    print("=" * 70)
 
 
 if __name__ == "__main__":
-    import sys
-    
-    if len(sys.argv) > 1:
-        root = sys.argv[1]
-    else:
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        root = os.path.abspath(os.path.join(script_dir, ".."))
-    
-    np.random.seed(42)
-    generate_all_figures(root)
+    main()

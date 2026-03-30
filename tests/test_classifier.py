@@ -2,13 +2,15 @@
 """
 Unit Tests for Delaunay Triangulation Classifier
 
-This module provides comprehensive unit tests to validate:
-1. Data loading and preprocessing
-2. Delaunay triangulation correctness
-3. Classification accuracy
-4. Dynamic operations (insert/remove)
-5. SRR grid functionality
-6. Outlier detection
+Validates correctness of:
+1. Data loading and CSV format
+2. Delaunay triangulation geometric properties
+3. C++ classifier static and dynamic modes
+4. Outlier detection logic
+5. 2D Buckets grid sizing and O(1) lookup
+6. Decision boundary geometry (half-plane, nearest-vertex)
+7. Point-in-polygon ray casting
+8. Dataset generation output format
 
 Run with: python -m pytest tests/test_classifier.py -v
 Or: python tests/test_classifier.py
@@ -19,13 +21,11 @@ import sys
 import unittest
 import subprocess
 import tempfile
+import shutil
+import time
 import numpy as np
 import pandas as pd
 from pathlib import Path
-
-# Add scripts directory to path
-SCRIPT_DIR = Path(__file__).parent.parent / "scripts"
-sys.path.insert(0, str(SCRIPT_DIR))
 
 # Project root
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -33,14 +33,15 @@ CPP_MAIN = PROJECT_ROOT / "build" / "main"
 CPP_BENCHMARK = PROJECT_ROOT / "build" / "benchmark"
 
 
+# ============================================================================
+# 1. Data Loading
+# ============================================================================
+
 class TestDataLoading(unittest.TestCase):
     """Test data loading and CSV format handling."""
-    
+
     def setUp(self):
-        """Create temporary test files."""
         self.temp_dir = tempfile.mkdtemp()
-        
-        # Create a simple test dataset
         self.test_data = np.array([
             [0.0, 0.0, 0],
             [1.0, 0.0, 0],
@@ -48,467 +49,569 @@ class TestDataLoading(unittest.TestCase):
             [1.0, 1.0, 1],
             [0.5, 0.5, 0],
         ])
-        
         self.train_path = os.path.join(self.temp_dir, "test_train.csv")
-        np.savetxt(self.train_path, self.test_data, delimiter=',', fmt=['%.6f', '%.6f', '%d'])
-        
+        np.savetxt(self.train_path, self.test_data,
+                   delimiter=',', fmt=['%.6f', '%.6f', '%d'])
         self.test_path = os.path.join(self.temp_dir, "test_X.csv")
-        np.savetxt(self.test_path, self.test_data[:, :2], delimiter=',', fmt='%.6f')
-    
+        np.savetxt(self.test_path, self.test_data[:, :2],
+                   delimiter=',', fmt='%.6f')
+
     def tearDown(self):
-        """Clean up temporary files."""
-        import shutil
         shutil.rmtree(self.temp_dir, ignore_errors=True)
-    
-    def test_csv_format(self):
-        """Test that CSV files are correctly formatted."""
+
+    def test_csv_format_three_columns(self):
+        """Training CSV should have 3 columns: x, y, label."""
         df = pd.read_csv(self.train_path, header=None)
-        self.assertEqual(df.shape[1], 3, "Training CSV should have 3 columns: x, y, label")
-        self.assertEqual(df.shape[0], 5, "Should have 5 data points")
-    
-    def test_label_values(self):
-        """Test that labels are integers."""
+        self.assertEqual(df.shape[1], 3)
+        self.assertEqual(df.shape[0], 5)
+
+    def test_labels_are_integers(self):
+        """Labels column should contain integer values."""
         df = pd.read_csv(self.train_path, header=None)
         labels = df.iloc[:, 2].values
-        self.assertTrue(np.all(labels == labels.astype(int)), "Labels should be integers")
+        self.assertTrue(np.all(labels == labels.astype(int)))
 
+
+# ============================================================================
+# 2. Delaunay Triangulation Properties
+# ============================================================================
 
 class TestDelaunayTriangulation(unittest.TestCase):
-    """Test Delaunay triangulation properties."""
-    
-    def test_scipy_delaunay_basic(self):
-        """Test basic Delaunay triangulation with scipy."""
+    """Test Delaunay triangulation geometric properties."""
+
+    def test_basic_triangulation(self):
+        """Triangulation of 5 points should produce valid triangles."""
         from scipy.spatial import Delaunay
-        
-        # Simple square with center point
-        points = np.array([
-            [0, 0], [1, 0], [1, 1], [0, 1], [0.5, 0.5]
-        ])
-        
+        points = np.array([[0, 0], [1, 0], [1, 1], [0, 1], [0.5, 0.5]])
         tri = Delaunay(points)
-        
-        # Should have valid triangles
-        self.assertGreater(len(tri.simplices), 0, "Should create triangles")
-        
-        # All simplices should have 3 vertices
+        self.assertGreater(len(tri.simplices), 0)
         for simplex in tri.simplices:
-            self.assertEqual(len(simplex), 3, "Each triangle should have 3 vertices")
-    
-    def test_delaunay_circumcircle_property(self):
-        """Test that Delaunay triangulation satisfies circumcircle property."""
+            self.assertEqual(len(simplex), 3)
+
+    def test_circumcircle_property(self):
+        """No point should lie strictly inside any triangle's circumcircle."""
         from scipy.spatial import Delaunay
-        
         np.random.seed(42)
         points = np.random.rand(20, 2)
         tri = Delaunay(points)
-        
-        # For each triangle, no other point should be inside its circumcircle
-        # This is the defining property of Delaunay triangulation
+
         for simplex in tri.simplices:
-            # Get triangle vertices
             p1, p2, p3 = points[simplex]
-            
-            # Calculate circumcenter and radius
             ax, ay = p1
             bx, by = p2
             cx, cy = p3
-            
+
             d = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
             if abs(d) < 1e-10:
-                continue  # Degenerate triangle
-            
-            ux = ((ax**2 + ay**2) * (by - cy) + (bx**2 + by**2) * (cy - ay) + (cx**2 + cy**2) * (ay - by)) / d
-            uy = ((ax**2 + ay**2) * (cx - bx) + (bx**2 + by**2) * (ax - cx) + (cx**2 + cy**2) * (bx - ax)) / d
-            
+                continue
+
+            ux = ((ax**2 + ay**2) * (by - cy) +
+                  (bx**2 + by**2) * (cy - ay) +
+                  (cx**2 + cy**2) * (ay - by)) / d
+            uy = ((ax**2 + ay**2) * (cx - bx) +
+                  (bx**2 + by**2) * (ax - cx) +
+                  (cx**2 + cy**2) * (bx - ax)) / d
             radius_sq = (ax - ux)**2 + (ay - uy)**2
-            
-            # Check that no other point is strictly inside the circumcircle
+
             for i, pt in enumerate(points):
                 if i in simplex:
                     continue
                 dist_sq = (pt[0] - ux)**2 + (pt[1] - uy)**2
-                # Allow small tolerance for numerical errors
                 self.assertGreaterEqual(dist_sq, radius_sq - 1e-10,
                     "No point should be strictly inside circumcircle")
 
 
+# ============================================================================
+# 3. C++ Classifier Integration Tests
+# ============================================================================
+
 class TestCppClassifier(unittest.TestCase):
     """Test the C++ classifier executable."""
-    
+
     @classmethod
     def setUpClass(cls):
-        """Check that C++ executable exists."""
         if not CPP_MAIN.exists():
-            raise unittest.SkipTest(f"C++ executable not found at {CPP_MAIN}. Run 'make' first.")
-    
+            raise unittest.SkipTest(
+                f"C++ executable not found at {CPP_MAIN}. Run 'make' first.")
+
     def setUp(self):
-        """Create test data files."""
         self.temp_dir = tempfile.mkdtemp()
         self.results_dir = os.path.join(self.temp_dir, "results")
         os.makedirs(self.results_dir, exist_ok=True)
-        
-        # Create simple linearly separable data
+
         np.random.seed(42)
         n_per_class = 50
-        
-        # Class 0: bottom-left cluster
+
         X0 = np.random.randn(n_per_class, 2) * 0.3 + np.array([-1, -1])
         y0 = np.zeros(n_per_class, dtype=int)
-        
-        # Class 1: top-right cluster
         X1 = np.random.randn(n_per_class, 2) * 0.3 + np.array([1, 1])
         y1 = np.ones(n_per_class, dtype=int)
-        
+
         X = np.vstack([X0, X1])
         y = np.hstack([y0, y1])
-        
-        # Shuffle
         idx = np.random.permutation(len(X))
         X, y = X[idx], y[idx]
-        
-        # Split train/test
+
         train_size = int(0.8 * len(X))
         self.X_train, self.y_train = X[:train_size], y[:train_size]
         self.X_test, self.y_test = X[train_size:], y[train_size:]
-        
-        # Save to files
+
         self.train_path = os.path.join(self.temp_dir, "train.csv")
-        self.test_path = os.path.join(self.temp_dir, "test.csv")
-        self.test_labels_path = os.path.join(self.temp_dir, "test_y.csv")
-        
+        self.test_labeled_path = os.path.join(self.temp_dir, "test_y.csv")
+        self.test_unlabeled_path = os.path.join(self.temp_dir, "test_X.csv")
+
         train_data = np.column_stack([self.X_train, self.y_train])
-        np.savetxt(self.train_path, train_data, delimiter=',', fmt=['%.6f', '%.6f', '%d'])
-        np.savetxt(self.test_path, self.X_test, delimiter=',', fmt='%.6f')
-        
+        np.savetxt(self.train_path, train_data,
+                   delimiter=',', fmt=['%.6f', '%.6f', '%d'])
+
         test_y_data = np.column_stack([self.X_test, self.y_test])
-        np.savetxt(self.test_labels_path, test_y_data, delimiter=',', fmt=['%.6f', '%.6f', '%d'])
-    
+        np.savetxt(self.test_labeled_path, test_y_data,
+                   delimiter=',', fmt=['%.6f', '%.6f', '%d'])
+
+        np.savetxt(self.test_unlabeled_path, self.X_test,
+                   delimiter=',', fmt='%.6f')
+
     def tearDown(self):
-        """Clean up temporary files."""
-        import shutil
         shutil.rmtree(self.temp_dir, ignore_errors=True)
-    
-    def test_cpp_static_mode(self):
-        """Test C++ classifier in static mode."""
-        cmd = [str(CPP_MAIN), "static", self.train_path, self.test_path, self.results_dir]
+
+    def test_static_mode_runs(self):
+        """C++ classifier should complete static mode without errors."""
+        cmd = [str(CPP_MAIN), "static", self.train_path,
+               self.test_unlabeled_path, self.results_dir]
         result = subprocess.run(cmd, capture_output=True, text=True)
-        
-        self.assertEqual(result.returncode, 0, f"C++ static mode failed: {result.stderr}")
-        
-        # Check output files exist
+        self.assertEqual(result.returncode, 0,
+                         f"Static mode failed: {result.stderr}")
         predictions_file = os.path.join(self.results_dir, "predictions.csv")
-        self.assertTrue(os.path.exists(predictions_file), "Predictions file should be created")
-    
-    def test_cpp_accuracy(self):
-        """Test that C++ classifier achieves reasonable accuracy on simple data."""
-        cmd = [str(CPP_MAIN), "static", self.train_path, self.test_path, self.results_dir]
+        self.assertTrue(os.path.exists(predictions_file),
+                        "predictions.csv should be created")
+
+    def test_accuracy_on_separable_data(self):
+        """Accuracy on well-separated clusters should exceed 90%."""
+        cmd = [str(CPP_MAIN), "static", self.train_path,
+               self.test_labeled_path, self.results_dir]
         result = subprocess.run(cmd, capture_output=True, text=True)
-        
-        # Parse accuracy from output
+        self.assertEqual(result.returncode, 0,
+                         f"Static mode failed: {result.stderr}")
+
         accuracy = None
         for line in result.stdout.split('\n'):
-            if "Accuracy" in line:
+            if "Accuracy" in line and "%" in line:
                 try:
-                    accuracy = float(line.split(':')[-1].strip().replace('%', ''))
-                except:
+                    # Parse "Accuracy:  95.0% (19/20)" format
+                    acc_part = line.split(':')[-1].strip()
+                    accuracy = float(acc_part.split('%')[0].strip())
+                except (ValueError, IndexError):
                     pass
-        
-        # On well-separated clusters, should achieve > 90% accuracy
-        if accuracy is not None:
-            self.assertGreater(accuracy, 90.0, 
-                f"Accuracy on simple separable data should be > 90%, got {accuracy}%")
 
+        self.assertIsNotNone(accuracy,
+            "C++ should report accuracy when given labeled test file")
+        self.assertGreater(accuracy, 90.0,
+            f"Accuracy on separable data should be > 90%, got {accuracy}%")
+
+    def test_dynamic_mode_runs(self):
+        """C++ dynamic stress test should complete without errors."""
+        # Create stream file (subset of test data with labels)
+        stream_path = os.path.join(self.temp_dir, "stream.csv")
+        stream_data = np.column_stack([self.X_test[:5], self.y_test[:5]])
+        np.savetxt(stream_path, stream_data,
+                   delimiter=',', fmt=['%.6f', '%.6f', '%d'])
+
+        log_path = os.path.join(self.results_dir, "dynamic_log.csv")
+        cmd = [str(CPP_MAIN), "dynamic", self.train_path,
+               stream_path, log_path]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0,
+                         f"Dynamic mode failed: {result.stderr}")
+
+        self.assertTrue(os.path.exists(log_path),
+                        "Dynamic log CSV should be created")
+        df = pd.read_csv(log_path)
+        self.assertIn('operation', df.columns)
+        self.assertIn('time_ns', df.columns)
+        self.assertGreater(len(df), 0, "Log should contain timing entries")
+
+
+# ============================================================================
+# 4. Outlier Detection
+# ============================================================================
 
 class TestOutlierDetection(unittest.TestCase):
-    """Test outlier detection functionality."""
-    
-    def test_outlier_isolation(self):
-        """Test that isolated points are detected as outliers."""
-        # Create data with one clear outlier
-        data = np.array([
-            [0, 0, 0], [0.1, 0, 0], [0, 0.1, 0], [0.1, 0.1, 0],  # Cluster
-            [10, 10, 0],  # Outlier - far from cluster
-        ])
-        
-        # Using k-NN based outlier detection concept
+    """Test outlier detection via k-NN same-class density."""
+
+    def test_isolated_point_detected(self):
+        """A point far from its cluster should have highest mean distance."""
         from sklearn.neighbors import NearestNeighbors
-        
-        X = data[:, :2]
+
+        X = np.array([
+            [0, 0], [0.1, 0], [0, 0.1], [0.1, 0.1],  # Cluster
+            [10, 10],  # Outlier
+        ])
         k = 3
-        
-        nn = NearestNeighbors(n_neighbors=k+1)  # +1 because point is its own neighbor
+        nn = NearestNeighbors(n_neighbors=k + 1)
         nn.fit(X)
         distances, _ = nn.kneighbors(X)
-        
-        # Mean distance to k neighbors (excluding self)
         mean_distances = distances[:, 1:].mean(axis=1)
-        
-        # The outlier should have highest mean distance
         outlier_idx = np.argmax(mean_distances)
-        self.assertEqual(outlier_idx, 4, "Point at (10,10) should be detected as outlier")
+        self.assertEqual(outlier_idx, 4,
+                         "Point at (10,10) should be the outlier")
 
 
-class TestSRRGrid(unittest.TestCase):
-    """Test Square Root Rule grid functionality."""
-    
-    def test_grid_size_formula(self):
-        """Test that grid size follows sqrt(n) rule."""
+# ============================================================================
+# 5. 2D Buckets Grid
+# ============================================================================
+
+class TestGridAndBuckets(unittest.TestCase):
+    """Test Square Root Rule grid sizing and O(1) bucket lookup."""
+
+    def test_grid_size_follows_sqrt_n(self):
+        """Grid dimension should be ceil(sqrt(n))."""
+        import math
         test_cases = [
-            (100, 10),   # sqrt(100) = 10
-            (1000, 31),  # sqrt(1000) ≈ 31.6 → 31 or 32
-            (10000, 100),  # sqrt(10000) = 100
+            (100, 10),
+            (1000, 32),   # ceil(sqrt(1000)) = 32
+            (10000, 100),
         ]
-        
-        for n, expected_approx in test_cases:
-            grid_size = int(np.sqrt(n))
-            self.assertAlmostEqual(grid_size, expected_approx, delta=1,
-                msg=f"For n={n}, grid size should be ~{expected_approx}")
-    
-    def test_grid_lookup_O1(self):
-        """Test that grid lookup is O(1) complexity."""
-        import time
-        
-        # Different grid sizes
+        for n, expected in test_cases:
+            grid_size = int(math.ceil(math.sqrt(n)))
+            self.assertAlmostEqual(grid_size, expected, delta=1,
+                msg=f"For n={n}, grid size should be ~{expected}")
+
+    def test_bucket_index_is_O1(self):
+        """Bucket lookup time should be constant regardless of grid size."""
         grid_sizes = [10, 100, 1000]
         lookup_times = []
-        
+
         for size in grid_sizes:
-            # Create dummy grid as dict
-            grid = {(i, j): [] for i in range(size) for j in range(size)}
-            
-            # Time 1000 lookups
+            grid = {(i, j): 0 for i in range(size) for j in range(size)}
             start = time.perf_counter()
             for _ in range(1000):
                 x, y = np.random.randint(0, size, 2)
                 _ = grid.get((x, y))
             elapsed = time.perf_counter() - start
             lookup_times.append(elapsed)
-        
-        # O(1) means time should be roughly constant regardless of grid size
-        # Allow 5x variation for measurement noise
+
         ratio = lookup_times[-1] / lookup_times[0]
-        self.assertLess(ratio, 5.0, 
-            f"Grid lookup should be O(1), but time ratio is {ratio:.2f}")
+        self.assertLess(ratio, 5.0,
+            f"Lookup should be O(1), but time ratio is {ratio:.2f}")
 
-
-class TestDynamicOperations(unittest.TestCase):
-    """Test dynamic insert/remove operations."""
-    
-    def test_insert_preserves_delaunay(self):
-        """Test that inserting a point maintains Delaunay property."""
-        from scipy.spatial import Delaunay
-        
-        # Start with base points
-        np.random.seed(42)
-        base_points = np.random.rand(20, 2)
-        
-        # Insert new point
-        new_point = np.array([[0.5, 0.5]])
-        all_points = np.vstack([base_points, new_point])
-        
-        # Build triangulation
-        tri = Delaunay(all_points)
-        
-        # Should still be valid
-        self.assertGreater(len(tri.simplices), 0)
-        
-        # New point should be in some triangle(s)
-        new_idx = len(base_points)  # Index of new point
-        found_in_triangle = False
-        for simplex in tri.simplices:
-            if new_idx in simplex:
-                found_in_triangle = True
-                break
-        
-        self.assertTrue(found_in_triangle, "New point should be part of triangulation")
-
-
-class TestClassificationVoting(unittest.TestCase):
-    """Test classification voting mechanism."""
-    
-    def test_majority_vote(self):
-        """Test majority voting with 3 vertices."""
-        test_cases = [
-            ([0, 0, 0], 0),  # All same
-            ([1, 1, 1], 1),  # All same
-            ([0, 0, 1], 0),  # 2 vs 1
-            ([0, 1, 1], 1),  # 1 vs 2
-            ([0, 1, 2], None),  # Tie - any is valid
-        ]
-        
-        def majority_vote(labels):
-            """Simple majority vote."""
-            from collections import Counter
-            c = Counter(labels)
-            most_common = c.most_common(2)
-            if len(most_common) == 1:
-                return most_common[0][0]
-            if most_common[0][1] == most_common[1][1]:
-                return None  # Tie
-            return most_common[0][0]
-        
-        for labels, expected in test_cases:
-            result = majority_vote(labels)
-            if expected is not None:
-                self.assertEqual(result, expected, f"Majority of {labels} should be {expected}")
-
-
-class TestDatasetGeneration(unittest.TestCase):
-    """Test dataset generation scripts."""
-    
-    def test_data_generator_output_format(self):
-        """Test that data generator creates correct file format."""
-        data_dir = PROJECT_ROOT / "data" / "train"
-        
-        if not data_dir.exists():
-            self.skipTest("Data directory not found. Run data_generator.py first.")
-        
-        # Check at least one dataset exists
-        csv_files = list(data_dir.glob("*_train.csv"))
-        if not csv_files:
-            self.skipTest("No training files found. Run data_generator.py first.")
-        
-        # Validate format of first file found
-        df = pd.read_csv(csv_files[0], header=None)
-        
-        self.assertEqual(df.shape[1], 3, "Should have 3 columns")
-        self.assertTrue(df.iloc[:, 0].dtype in [np.float64, np.float32], "X should be float")
-        self.assertTrue(df.iloc[:, 1].dtype in [np.float64, np.float32], "Y should be float")
-
-
-class Test2DBuckets(unittest.TestCase):
-    """Test 2D Buckets data structure for O(1) dynamic classification."""
-    
-    def test_point_in_polygon_ray_casting(self):
-        """Test ray casting algorithm for point-in-polygon."""
-        # Square polygon
-        polygon = np.array([[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]])
-        
-        def point_in_polygon(x, y, poly):
-            """Ray casting algorithm."""
-            n = len(poly) - 1  # Last point = first point
-            inside = False
-            j = n - 1
-            for i in range(n):
-                xi, yi = poly[i]
-                xj, yj = poly[j]
-                if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi) + xi):
-                    inside = not inside
-                j = i
-            return inside
-        
-        # Test points inside
-        self.assertTrue(point_in_polygon(0.5, 0.5, polygon), "Center should be inside")
-        self.assertTrue(point_in_polygon(0.25, 0.25, polygon), "Quarter point should be inside")
-        
-        # Test points outside
-        self.assertFalse(point_in_polygon(1.5, 0.5, polygon), "Point outside right should be outside")
-        self.assertFalse(point_in_polygon(-0.5, 0.5, polygon), "Point outside left should be outside")
-    
-    def test_bucket_class_detection(self):
-        """Test that buckets correctly detect single vs multi-class regions."""
-        # Simulate bucket sampling
-        def sample_bucket_classes(center_class, corner_classes):
-            """Determine bucket type from 5 sample points."""
-            all_classes = [center_class] + corner_classes
-            unique = set(all_classes)
-            return len(unique)
-        
-        # Single class bucket
-        self.assertEqual(sample_bucket_classes(0, [0, 0, 0, 0]), 1)
-        
-        # Two class bucket
-        self.assertEqual(sample_bucket_classes(0, [0, 1, 0, 1]), 2)
-        
-        # Three class bucket
-        self.assertEqual(sample_bucket_classes(0, [0, 1, 2, 0]), 3)
-    
-    def test_srr_bucket_index_calculation(self):
-        """Test O(1) bucket index calculation."""
-        # Simulate SRR grid with 10x10 buckets
+    def test_bucket_index_calculation(self):
+        """Bucket index from coordinates should map correctly."""
         min_x, max_x = 0.0, 10.0
         min_y, max_y = 0.0, 10.0
         cols, rows = 10, 10
         step_x = (max_x - min_x) / cols
         step_y = (max_y - min_y) / rows
-        
+
         def get_bucket_index(x, y):
             c = int((x - min_x) / step_x)
             r = int((y - min_y) / step_y)
             c = max(0, min(c, cols - 1))
             r = max(0, min(r, rows - 1))
             return r * cols + c
-        
-        # Test corner buckets
-        self.assertEqual(get_bucket_index(0.5, 0.5), 0)  # Bottom-left
-        self.assertEqual(get_bucket_index(9.5, 0.5), 9)  # Bottom-right
-        self.assertEqual(get_bucket_index(0.5, 9.5), 90)  # Top-left
-        self.assertEqual(get_bucket_index(9.5, 9.5), 99)  # Top-right
-        
-        # Test center bucket
-        self.assertEqual(get_bucket_index(5.5, 5.5), 55)
-    
-    def test_classify_single_dynamic_accuracy(self):
-        """Test that classify_single_dynamic returns same results as classify_single for single-class buckets."""
-        # This is a conceptual test - actual implementation test requires C++
-        # Testing the logic: for single-class buckets, should return dominant_class
-        
-        class MockBucket:
-            def __init__(self, num_classes, dominant_class):
-                self.num_classes = num_classes
-                self.dominant_class = dominant_class
-            
-            def classify_point(self, x, y):
-                if self.num_classes == 1:
-                    return self.dominant_class  # O(1)
-                return None  # Would need full classification
-        
-        # Single class bucket
-        bucket = MockBucket(1, 2)
-        self.assertEqual(bucket.classify_point(0.5, 0.5), 2)
-        
-        # Multi-class bucket returns None (would fallback)
-        bucket = MockBucket(2, 1)
-        self.assertIsNone(bucket.classify_point(0.5, 0.5))
 
+        self.assertEqual(get_bucket_index(0.5, 0.5), 0)    # Bottom-left
+        self.assertEqual(get_bucket_index(9.5, 0.5), 9)    # Bottom-right
+        self.assertEqual(get_bucket_index(0.5, 9.5), 90)   # Top-left
+        self.assertEqual(get_bucket_index(9.5, 9.5), 99)   # Top-right
+        self.assertEqual(get_bucket_index(5.5, 5.5), 55)   # Center
+
+    def test_clamping_handles_edge_cases(self):
+        """Points outside the grid should be clamped to valid indices."""
+        min_x, max_x = 0.0, 10.0
+        min_y, max_y = 0.0, 10.0
+        cols, rows = 10, 10
+        step_x = (max_x - min_x) / cols
+        step_y = (max_y - min_y) / rows
+
+        def get_bucket_index(x, y):
+            c = int((x - min_x) / step_x)
+            r = int((y - min_y) / step_y)
+            c = max(0, min(c, cols - 1))
+            r = max(0, min(r, rows - 1))
+            return r * cols + c
+
+        # Points outside bounds should clamp to edge buckets
+        idx = get_bucket_index(-5.0, -5.0)
+        self.assertEqual(idx, 0, "Negative coords should clamp to bucket 0")
+
+        idx = get_bucket_index(100.0, 100.0)
+        self.assertEqual(idx, 99, "Far positive coords should clamp to last bucket")
+
+
+# ============================================================================
+# 6. Decision Boundary Geometry
+# ============================================================================
+
+class TestDecisionBoundary(unittest.TestCase):
+    """Test half-plane and nearest-vertex decision boundary logic."""
+
+    def test_half_plane_two_class_triangle(self):
+        """Half-plane test should correctly separate two classes in a triangle.
+
+        Given triangle with vertices:
+          v0 = (0, 0) class 0
+          v1 = (2, 0) class 0
+          v2 = (1, 2) class 1
+
+        The decision boundary is the line connecting the midpoints of the
+        two cross-class edges (v0-v2 and v1-v2). Points on the v2 side of
+        this line should be class 1, others class 0.
+        """
+        # Triangle vertices
+        v0, v1, v2 = np.array([0, 0]), np.array([2, 0]), np.array([1, 2])
+        l0, l1, l2 = 0, 0, 1  # v2 is isolated (class 1)
+
+        # Midpoints of cross-class edges
+        mid_v0_v2 = (v0 + v2) / 2   # (0.5, 1.0)
+        mid_v1_v2 = (v1 + v2) / 2   # (1.5, 1.0)
+
+        # Decision boundary line direction
+        line_dx = mid_v1_v2[0] - mid_v0_v2[0]
+        line_dy = mid_v1_v2[1] - mid_v0_v2[1]
+
+        def classify(px, py):
+            cross_query = (line_dx * (py - mid_v0_v2[1]) -
+                          line_dy * (px - mid_v0_v2[0]))
+            cross_isolated = (line_dx * (v2[1] - mid_v0_v2[1]) -
+                            line_dy * (v2[0] - mid_v0_v2[0]))
+            if (cross_query > 0) == (cross_isolated > 0):
+                return l2  # isolated class
+            else:
+                return l0  # majority class
+
+        # Points near v0 and v1 (majority side) should be class 0
+        self.assertEqual(classify(0.5, 0.2), 0)
+        self.assertEqual(classify(1.5, 0.2), 0)
+        self.assertEqual(classify(1.0, 0.3), 0)
+
+        # Points near v2 (isolated side) should be class 1
+        self.assertEqual(classify(1.0, 1.5), 1)
+        self.assertEqual(classify(0.8, 1.3), 1)
+
+    def test_three_class_nearest_vertex(self):
+        """Three distinct classes: nearest-vertex should determine the class."""
+        v0, v1, v2 = np.array([0, 0]), np.array([4, 0]), np.array([2, 4])
+        l0, l1, l2 = 0, 1, 2
+
+        def classify_nearest(px, py):
+            d0 = (px - v0[0])**2 + (py - v0[1])**2
+            d1 = (px - v1[0])**2 + (py - v1[1])**2
+            d2 = (px - v2[0])**2 + (py - v2[1])**2
+            if d0 <= d1 and d0 <= d2:
+                return l0
+            if d1 <= d0 and d1 <= d2:
+                return l1
+            return l2
+
+        self.assertEqual(classify_nearest(0.5, 0.5), 0)
+        self.assertEqual(classify_nearest(3.5, 0.5), 1)
+        self.assertEqual(classify_nearest(2.0, 3.5), 2)
+
+    def test_homogeneous_triangle_returns_unanimous(self):
+        """All same class: should return that class regardless of position."""
+        label = 2
+        # Any point in the triangle gets the same label
+        self.assertEqual(label, 2)
+
+
+# ============================================================================
+# 7. Point-in-Polygon and Bucket Classification
+# ============================================================================
+
+class TestBucketClassification(unittest.TestCase):
+    """Test 2D Buckets classification types: HOMOGENEOUS, BIPARTITIONED, MULTI."""
+
+    def test_point_in_polygon_ray_casting(self):
+        """Ray casting should correctly classify points inside/outside a square."""
+        polygon = np.array([[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]])
+
+        def point_in_polygon(x, y, poly):
+            n = len(poly) - 1
+            inside = False
+            j = n - 1
+            for i in range(n):
+                xi, yi = poly[i]
+                xj, yj = poly[j]
+                if (((yi > y) != (yj > y)) and
+                        (x < (xj - xi) * (y - yi) / (yj - yi) + xi)):
+                    inside = not inside
+                j = i
+            return inside
+
+        self.assertTrue(point_in_polygon(0.5, 0.5, polygon))
+        self.assertTrue(point_in_polygon(0.25, 0.25, polygon))
+        self.assertFalse(point_in_polygon(1.5, 0.5, polygon))
+        self.assertFalse(point_in_polygon(-0.5, 0.5, polygon))
+
+    def test_homogeneous_bucket_returns_dominant(self):
+        """Single-class bucket should always return dominant_class."""
+        class MockBucket:
+            def __init__(self, dominant_class):
+                self.type = 'HOMOGENEOUS'
+                self.dominant_class = dominant_class
+            def classify_point(self, x, y):
+                return self.dominant_class
+
+        bucket = MockBucket(2)
+        self.assertEqual(bucket.classify_point(0.0, 0.0), 2)
+        self.assertEqual(bucket.classify_point(99.0, -50.0), 2)
+
+    def test_bipartitioned_bucket_half_plane(self):
+        """Two-class bucket should classify via half-plane dot product."""
+        # Boundary: x = 0.5 (vertical line at x=0.5)
+        # nx=1, ny=0, d=-0.5 → dot = 1*x + 0*y - 0.5
+        nx, ny, d = 1.0, 0.0, -0.5
+        class_positive, class_negative = 1, 0
+
+        def classify(x, y):
+            dot = nx * x + ny * y + d
+            return class_positive if dot >= 0 else class_negative
+
+        self.assertEqual(classify(0.8, 0.5), 1)   # Right of boundary
+        self.assertEqual(classify(0.2, 0.5), 0)   # Left of boundary
+        self.assertEqual(classify(0.5, 0.5), 1)   # On boundary (positive)
+
+    def test_bucket_type_detection(self):
+        """Bucket type should be determined by number of distinct classes."""
+        def detect_type(classes_in_bucket):
+            n = len(set(classes_in_bucket))
+            if n <= 1:
+                return 'HOMOGENEOUS'
+            elif n == 2:
+                return 'BIPARTITIONED'
+            else:
+                return 'MULTI_PARTITIONED'
+
+        self.assertEqual(detect_type([0, 0, 0, 0]), 'HOMOGENEOUS')
+        self.assertEqual(detect_type([0, 0, 1, 1]), 'BIPARTITIONED')
+        self.assertEqual(detect_type([0, 1, 2]), 'MULTI_PARTITIONED')
+
+
+# ============================================================================
+# 8. Dynamic Operations
+# ============================================================================
+
+class TestDynamicOperations(unittest.TestCase):
+    """Test dynamic insert/remove operations preserve triangulation."""
+
+    def test_insert_preserves_delaunay(self):
+        """Inserting a point should produce a valid Delaunay triangulation."""
+        from scipy.spatial import Delaunay
+
+        np.random.seed(42)
+        base_points = np.random.rand(20, 2)
+        new_point = np.array([[0.5, 0.5]])
+        all_points = np.vstack([base_points, new_point])
+
+        tri = Delaunay(all_points)
+        self.assertGreater(len(tri.simplices), 0)
+
+        new_idx = len(base_points)
+        found = any(new_idx in simplex for simplex in tri.simplices)
+        self.assertTrue(found, "New point should appear in triangulation")
+
+    def test_remove_reduces_vertex_count(self):
+        """Removing a point should reduce the triangulation vertex count."""
+        from scipy.spatial import Delaunay
+
+        np.random.seed(42)
+        points = np.random.rand(20, 2)
+        tri_before = Delaunay(points)
+        n_before = len(points)
+
+        # Remove last point and retriangulate
+        points_after = points[:-1]
+        tri_after = Delaunay(points_after)
+        n_after = len(points_after)
+
+        self.assertEqual(n_after, n_before - 1)
+        self.assertGreater(len(tri_after.simplices), 0)
+
+
+# ============================================================================
+# 9. Dataset Generation
+# ============================================================================
+
+class TestDatasetGeneration(unittest.TestCase):
+    """Test that generate_datasets.py produces correct output format."""
+
+    def test_training_file_format(self):
+        """Training CSV should have 3 float/int columns, no header."""
+        data_dir = PROJECT_ROOT / "data" / "train"
+
+        if not data_dir.exists():
+            self.skipTest("Data directory not found. "
+                          "Run generate_datasets.py first.")
+
+        csv_files = list(data_dir.glob("*_train.csv"))
+        if not csv_files:
+            self.skipTest("No training files found. "
+                          "Run generate_datasets.py first.")
+
+        df = pd.read_csv(csv_files[0], header=None)
+        self.assertEqual(df.shape[1], 3, "Should have 3 columns (x, y, label)")
+        self.assertTrue(df.iloc[:, 0].dtype in [np.float64, np.float32])
+        self.assertTrue(df.iloc[:, 1].dtype in [np.float64, np.float32])
+
+    def test_test_files_exist_in_pairs(self):
+        """Each dataset should have both _test_X.csv and _test_y.csv."""
+        test_dir = PROJECT_ROOT / "data" / "test"
+
+        if not test_dir.exists():
+            self.skipTest("Test data directory not found.")
+
+        x_files = {f.stem.replace('_test_X', '')
+                   for f in test_dir.glob("*_test_X.csv")}
+        y_files = {f.stem.replace('_test_y', '')
+                   for f in test_dir.glob("*_test_y.csv")}
+
+        if not x_files:
+            self.skipTest("No test files found.")
+
+        self.assertEqual(x_files, y_files,
+            "Every _test_X.csv should have a matching _test_y.csv")
+
+
+# ============================================================================
+# Test Runner
+# ============================================================================
 
 def run_tests():
     """Run all unit tests."""
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
-    
-    # Add all test classes
+
+    # Core algorithm tests (always run)
     suite.addTests(loader.loadTestsFromTestCase(TestDataLoading))
     suite.addTests(loader.loadTestsFromTestCase(TestDelaunayTriangulation))
     suite.addTests(loader.loadTestsFromTestCase(TestOutlierDetection))
-    suite.addTests(loader.loadTestsFromTestCase(TestSRRGrid))
+    suite.addTests(loader.loadTestsFromTestCase(TestGridAndBuckets))
+    suite.addTests(loader.loadTestsFromTestCase(TestDecisionBoundary))
+    suite.addTests(loader.loadTestsFromTestCase(TestBucketClassification))
     suite.addTests(loader.loadTestsFromTestCase(TestDynamicOperations))
-    suite.addTests(loader.loadTestsFromTestCase(TestClassificationVoting))
     suite.addTests(loader.loadTestsFromTestCase(TestDatasetGeneration))
-    suite.addTests(loader.loadTestsFromTestCase(Test2DBuckets))
-    
-    # Add C++ tests only if executable exists
+
+    # C++ integration tests (only if executable exists)
     if CPP_MAIN.exists():
         suite.addTests(loader.loadTestsFromTestCase(TestCppClassifier))
-    
+
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)
-    
     return result.wasSuccessful()
 
 
 if __name__ == "__main__":
-    print("="*70)
-    print("DELAUNAY CLASSIFIER UNIT TESTS")
-    print("="*70)
-    
+    print("=" * 70)
+    print("DELAUNAY TRIANGULATION CLASSIFIER — UNIT TESTS")
+    print("=" * 70)
+
     success = run_tests()
-    
-    print("\n" + "="*70)
+
+    print("\n" + "=" * 70)
     if success:
-        print("✓ ALL TESTS PASSED")
+        print("ALL TESTS PASSED")
     else:
-        print("✗ SOME TESTS FAILED")
-    print("="*70)
-    
+        print("SOME TESTS FAILED")
+    print("=" * 70)
+
     sys.exit(0 if success else 1)

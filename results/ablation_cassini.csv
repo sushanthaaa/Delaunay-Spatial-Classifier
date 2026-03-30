@@ -1,9 +1,9 @@
 variant,accuracy,avg_inference_us,train_ms,notes
-Full Pipeline (Ours),0.996667,0.0025,6.596,SRR+Outlier+HalfPlane
-Without SRR Grid,0.996667,0.2425,0,No O(1) grid hint
-Without Outlier Removal,0.996667,0.0025,5.581,No Phase 1 cleanup
-Nearest Vertex Only (1-NN),0.996667,0.576527,0,No half-plane boundary
-2D Buckets Classification,0.996667,0.00263667,0,O(1) bucket-based path
+Full Pipeline (Ours),0.996667,0.00236,6.314,SRR+Outlier+HalfPlane
+Without SRR Grid,0.996667,0.225697,0,No O(1) grid hint
+Without Outlier Removal,0.996667,0.00222,5.079,No Phase 1 cleanup
+Nearest Vertex Only (1-NN),0.996667,0.799443,0,No half-plane boundary
+2D Buckets Classification,0.996667,0.00291667,0,O(1) bucket-based path
 Outlier multiplier=1.50,1,0,0,1164 vertices
 Outlier multiplier=2.00,0.996667,0,0,1186 vertices
 Outlier multiplier=3.00,0.996667,0,0,1198 vertices
