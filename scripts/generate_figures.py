@@ -817,8 +817,8 @@ def chart_ablation_accuracy(root_dir, figures_dir):
     df = pd.read_csv(summary_csv)
 
     # Filter to main ablation variants
-    variants = ['Full Pipeline', 'Without SRR Grid',
-                'Without Outlier Removal', 'Nearest Vertex Only']
+    variants = ['Full Pipeline', 'Without 2D Buckets',
+                'Without Outlier', 'Nearest Vertex']
     variant_labels = ['Full\nPipeline', 'No 2D\nBuckets',
                       'No Outlier\nRemoval', 'Nearest\nVertex']
 
@@ -832,7 +832,7 @@ def chart_ablation_accuracy(root_dir, figures_dir):
         vals = []
         for ds in datasets:
             sub = df[(df['dataset'] == ds) &
-                     (df['variant'].str.contains(var.split()[0], na=False))]
+                     (df['variant'].str.contains(var, na=False))]
             if len(sub) > 0:
                 vals.append(sub['accuracy'].values[0] * 100)
             else:

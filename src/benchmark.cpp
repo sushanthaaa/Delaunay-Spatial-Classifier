@@ -2,10 +2,13 @@
  * @file benchmark.cpp
  * @brief Fair C++ Benchmark Suite for Delaunay Classifier vs. Baselines
  *
- * FIXES APPLIED:
- * #10: Direct move timing (not insert+delete approximation)
- * #15: Adaptive SVM gamma based on data variance
- * #16: Adaptive Decision Tree depth based on dataset size
+ * Compares four algorithms on accuracy, inference speed, and dynamic updates:
+ *   1. FLANN KNN (k=5) — KD-tree spatial index
+ *   2. LibSVM (RBF kernel) — adaptive gamma via variance scaling
+ *   3. Decision Tree — adaptive depth via log2(n) heuristic
+ *   4. Delaunay Classifier (Ours) — O(1) via 2D Buckets
+ *
+ * All implementations in C++ with -O3 optimization for fair comparison.
  */
 
 #include <algorithm>
@@ -192,7 +195,7 @@ public:
 };
 
 // =============================================================================
-// LibSVM Wrapper — FIX #15: Adaptive gamma
+// LibSVM Wrapper — Adaptive gamma via variance scaling
 // =============================================================================
 
 class SVMClassifier {
@@ -206,8 +209,8 @@ public:
   SVMClassifier() : model_(nullptr) {
     param_.svm_type = C_SVC;
     param_.kernel_type = RBF;
-    param_.gamma = 0.5; // Will be overridden in fit()
-    param_.C = 1.0;     // Will be overridden in fit()
+    param_.gamma = 0.5;
+    param_.C = 1.0;
     param_.cache_size = 100;
     param_.eps = 0.001;
     param_.shrinking = 1;
@@ -227,19 +230,17 @@ public:
   void fit(const std::vector<std::tuple<float, float, int>> &train_data) {
     int n = static_cast<int>(train_data.size());
 
-    // FIX #15: Adaptive gamma = 1 / (n_features * variance)
-    // This is the standard scikit-learn 'scale' heuristic
+    // Adaptive gamma = 1 / (n_features * variance)
+    // Standard scikit-learn 'scale' heuristic
     DataStats stats = compute_data_stats(train_data);
     double variance = stats.total_variance;
     if (variance > 1e-10) {
       param_.gamma = 1.0 / (2.0 * variance);
     } else {
-      param_.gamma = 1.0; // Fallback for zero-variance data
+      param_.gamma = 1.0;
     }
 
-    // FIX #15: Also use a reasonable C value based on data scale
-    // Common heuristic: C = 1.0 works well when data is normalized;
-    // for unnormalized data, scale C by the reciprocal of variance
+    // Adaptive C based on data scale
     if (variance > 1e-10) {
       param_.C = std::max(1.0, 1.0 / variance);
     } else {
@@ -262,7 +263,6 @@ public:
       x_space_.push_back(x);
     }
 
-    // Suppress libsvm output
     svm_set_print_string_function([](const char *) {});
     model_ = svm_train(&prob_, &param_);
 
@@ -282,7 +282,7 @@ public:
 };
 
 // =============================================================================
-// Decision Tree — FIX #16: Adaptive depth
+// Decision Tree — Adaptive depth via log2(n) heuristic
 // =============================================================================
 
 struct DTNode {
@@ -329,7 +329,6 @@ private:
     for (const auto &pt : data)
       label_counts[std::get<2>(pt)]++;
 
-    // Leaf conditions: pure node, max depth reached, or too few samples
     if (label_counts.size() == 1 || depth >= max_depth_ ||
         (int)data.size() < min_samples_) {
       node->is_leaf = true;
@@ -355,7 +354,6 @@ private:
       }
       std::sort(values.begin(), values.end());
 
-      // Sample split candidates (every ~5% of sorted values)
       int step = std::max(1, (int)(values.size() / 20));
       for (size_t i = 1; i < values.size(); i += step) {
         float split = (values[i - 1] + values[i]) / 2;
@@ -425,7 +423,6 @@ private:
   }
 
 public:
-  // FIX #16: Accept adaptive max_depth parameter
   DecisionTreeCpp(int max_depth = 10, int min_samples = 2)
       : root_(nullptr), max_depth_(max_depth), min_samples_(min_samples) {}
 
@@ -509,7 +506,6 @@ int main(int argc, char *argv[]) {
   std::cout << "Loaded " << train_data.size() << " training points, "
             << test_data.size() << " test points." << std::endl;
 
-  // Compute data statistics for adaptive parameters
   DataStats stats = compute_data_stats(train_data);
   std::cout << "Data Stats: variance=" << stats.total_variance << ", range_x=["
             << stats.x_min << "," << stats.x_max << "]"
@@ -555,7 +551,7 @@ int main(int argc, char *argv[]) {
   }
 
   // ============================================
-  // STATIC 2: LibSVM — FIX #15: Adaptive gamma
+  // STATIC 2: LibSVM (RBF, adaptive gamma)
   // ============================================
   {
     std::cout << "Running LibSVM C++ (RBF, adaptive gamma="
@@ -592,10 +588,10 @@ int main(int argc, char *argv[]) {
   }
 
   // ============================================
-  // STATIC 3: Decision Tree — FIX #16: Adaptive depth
+  // STATIC 3: Decision Tree (adaptive depth)
   // ============================================
   {
-    // FIX #16: depth = min(20, max(5, 2 * log2(n)))
+    // depth = min(20, max(5, 2 * log2(n)))
     int adaptive_depth = std::min(
         20, std::max(5, (int)(2.0 * std::log2((double)train_data.size()))));
     std::cout << "Running C++ Decision Tree (adaptive depth=" << adaptive_depth
@@ -702,7 +698,7 @@ int main(int argc, char *argv[]) {
         {"C++ Decision Tree (Rebuild)", avg_rebuild, avg_rebuild, avg_rebuild});
   }
 
-  // Dynamic: Delaunay — FIX #10: DIRECTLY measure insert, move, delete
+  // Dynamic: Delaunay — directly measure insert, move, delete
   {
     std::cout << "Running Delaunay C++ (Incremental)..." << std::endl;
 
@@ -710,11 +706,11 @@ int main(int argc, char *argv[]) {
     classifier.set_output_dir("results");
     classifier.train(train_file, 3);
 
-    // FIX #10 & #17: Adaptive move offset based on data range
+    // Adaptive move offset: 1% of data range
     double range_x = stats.x_max - stats.x_min;
     double range_y = stats.y_max - stats.y_min;
-    double move_offset_x = 0.01 * range_x; // 1% of x range
-    double move_offset_y = 0.01 * range_y; // 1% of y range
+    double move_offset_x = 0.01 * range_x;
+    double move_offset_y = 0.01 * range_y;
 
     // --- Measure INSERT times ---
     double total_insert_ns = 0;
@@ -734,9 +730,7 @@ int main(int argc, char *argv[]) {
       inserted_points.push_back({x, y, label});
     }
 
-    // --- FIX #10: Measure MOVE times DIRECTLY using move_point() ---
-    // Previously this was approximated as insert + delete time.
-    // Now we call move_point() which implements Algorithm 3.
+    // --- Measure MOVE times directly via move_point() (Algorithm 3) ---
     double total_move_ns = 0;
     std::vector<std::tuple<float, float, int>> moved_points;
 

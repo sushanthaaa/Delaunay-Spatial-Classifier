@@ -155,7 +155,7 @@ def main():
                 continue
 
             full = ds_data[ds_data['variant'].str.contains('Full', na=False)]
-            no_grid = ds_data[ds_data['variant'].str.contains('Without SRR', na=False)]
+            no_grid = ds_data[ds_data['variant'].str.contains('Without.*(?:SRR|Grid|Buckets)', regex=True, na=False)]
             no_outlier = ds_data[ds_data['variant'].str.contains('Without Outlier', na=False)]
             nn_only = ds_data[ds_data['variant'].str.contains('Nearest Vertex', na=False)]
 

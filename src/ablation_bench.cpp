@@ -2,18 +2,15 @@
  * @file ablation_bench.cpp
  * @brief Ablation Study: Measures individual contribution of each component.
  *
- * FIXES APPLIED:
- * #10: Direct move timing in dynamic ablation
- * #15: Adaptive parameters (no hardcoded scale-dependent values)
- * #16: Adaptive Decision Tree depth
- * #17: Adaptive movement offsets based on data range
+ * Static ablation components:
+ *   A1: Full Pipeline — classify() via 2D Buckets (baseline)
+ *   A2: Without 2D Buckets Grid — classify_no_grid() via DT locate walk
+ *   A3: Without Outlier Removal — classify() with Phase 1 disabled
+ *   A4: Nearest Vertex Only — classify_nearest_vertex() (1-NN baseline)
+ *   A5: Outlier Multiplier Sensitivity — m = {1.5, 2.0, 3.0, 5.0, 10.0}
  *
- * Ablation components tested:
- * A1: SRR grid contribution (with vs without SRR hint)
- * A2: Outlier removal contribution
- * A3: Decision boundary type (half-plane vs nearest-vertex)
- * A4: 2D Buckets dynamic classification
- * A5: Dynamic update overhead (insert/move/delete)
+ * Dynamic ablation:
+ *   D1: Full Dynamic — insert/move/delete with local bucket rebuild
  */
 
 #include <algorithm>
@@ -173,11 +170,10 @@ int main(int argc, char *argv[]) {
   std::vector<DynamicAblationResult> dynamic_ablation;
 
   // ============================================================
-  // A1: FULL PIPELINE (SRR + Outlier + Half-plane boundary)
+  // A1: FULL PIPELINE (2D Buckets + Outlier + Decision Boundary)
   // ============================================================
   {
-    std::cout << "\n[A1] Full Pipeline (SRR + Outlier + Decision Boundary)..."
-              << std::endl;
+    std::cout << "\n[A1] Full Pipeline..." << std::endl;
     DelaunayClassifier clf;
     clf.set_use_outlier_removal(true);
     clf.set_output_dir("results");
@@ -207,14 +203,14 @@ int main(int argc, char *argv[]) {
     double accuracy = (double)correct / test_data.size();
 
     static_ablation.push_back({"Full Pipeline (Ours)", accuracy, avg_us,
-                               train_ms, "SRR+Outlier+HalfPlane"});
+                               train_ms, "2D Buckets + Outlier + HalfPlane"});
   }
 
   // ============================================================
-  // A2: Without SRR (raw DT locate, no grid hint)
+  // A2: Without 2D Buckets Grid (raw DT locate walk)
   // ============================================================
   {
-    std::cout << "[A2] Without SRR Grid..." << std::endl;
+    std::cout << "[A2] Without 2D Buckets Grid..." << std::endl;
     DelaunayClassifier clf;
     clf.set_use_outlier_removal(true);
     clf.set_output_dir("results");
@@ -223,7 +219,6 @@ int main(int argc, char *argv[]) {
     int correct = 0;
     auto start = std::chrono::high_resolution_clock::now();
     for (const auto &pt : test_data) {
-      // classify_no_grid: locate() without grid
       int pred = clf.classify_no_grid(std::get<0>(pt), std::get<1>(pt));
       if (pred == std::get<2>(pt))
         correct++;
@@ -237,8 +232,8 @@ int main(int argc, char *argv[]) {
     double avg_us = total_us / test_data.size();
     double accuracy = (double)correct / test_data.size();
 
-    static_ablation.push_back(
-        {"Without SRR Grid", accuracy, avg_us, 0, "No O(1) grid hint"});
+    static_ablation.push_back({"Without 2D Buckets Grid", accuracy, avg_us, 0,
+                               "DT locate walk (no O(1) grid)"});
   }
 
   // ============================================================
@@ -247,7 +242,7 @@ int main(int argc, char *argv[]) {
   {
     std::cout << "[A3] Without Outlier Removal..." << std::endl;
     DelaunayClassifier clf;
-    clf.set_use_outlier_removal(false); // Disable outlier removal
+    clf.set_use_outlier_removal(false);
     clf.set_output_dir("results");
 
     auto train_start = std::chrono::high_resolution_clock::now();
@@ -291,8 +286,6 @@ int main(int argc, char *argv[]) {
     int correct = 0;
     auto start = std::chrono::high_resolution_clock::now();
     for (const auto &pt : test_data) {
-      // FIX #4 ablation: this uses pure nearest-vertex, bypassing
-      // the half-plane decision boundary logic
       int pred = clf.classify_nearest_vertex(std::get<0>(pt), std::get<1>(pt));
       if (pred == std::get<2>(pt))
         correct++;
@@ -311,40 +304,10 @@ int main(int argc, char *argv[]) {
   }
 
   // ============================================================
-  // A5: 2D Buckets Dynamic Classification
+  // A5: Varying outlier multiplier sensitivity
   // ============================================================
   {
-    std::cout << "[A5] 2D Buckets Dynamic Classification..." << std::endl;
-    DelaunayClassifier clf;
-    clf.set_use_outlier_removal(true);
-    clf.set_output_dir("results");
-    clf.train(train_file, 3);
-
-    int correct = 0;
-    auto start = std::chrono::high_resolution_clock::now();
-    for (const auto &pt : test_data) {
-      int pred = clf.classify(std::get<0>(pt), std::get<1>(pt));
-      if (pred == std::get<2>(pt))
-        correct++;
-    }
-    auto end = std::chrono::high_resolution_clock::now();
-
-    double total_us =
-        std::chrono::duration_cast<std::chrono::nanoseconds>(end - start)
-            .count() /
-        1000.0;
-    double avg_us = total_us / test_data.size();
-    double accuracy = (double)correct / test_data.size();
-
-    static_ablation.push_back({"2D Buckets Classification", accuracy, avg_us, 0,
-                               "O(1) bucket-based path"});
-  }
-
-  // ============================================================
-  // A6: Varying outlier multiplier sensitivity
-  // ============================================================
-  {
-    std::cout << "[A6] Outlier Multiplier Sensitivity..." << std::endl;
+    std::cout << "[A5] Outlier Multiplier Sensitivity..." << std::endl;
     double multipliers[] = {1.5, 2.0, 3.0, 5.0, 10.0};
 
     for (double m : multipliers) {
@@ -372,20 +335,21 @@ int main(int argc, char *argv[]) {
   print_ablation_table(static_ablation, "STATIC ABLATION: " + dataset_name);
 
   // ============================================================
-  // DYNAMIC ABLATION — FIX #10: Direct measurement of each operation
+  // DYNAMIC ABLATION
   // ============================================================
   std::cout << "\n--- DYNAMIC ABLATION ---" << std::endl;
 
-  const int NUM_OPS = std::min(20, (int)test_data.size());
+  const int NUM_OPS = std::min(100, (int)test_data.size());
 
-  // FIX #17: Adaptive movement offset
+  // Adaptive movement offset: 1% of smaller data dimension
   double range_x = range.x_max - range.x_min;
   double range_y = range.y_max - range.y_min;
   double move_offset = 0.01 * std::min((double)range_x, (double)range_y);
 
-  // D1: Full pipeline with local index maintenance
+  // D1: Full pipeline with local bucket rebuild
   {
-    std::cout << "[D1] Full Dynamic (with local index updates)..." << std::endl;
+    std::cout << "[D1] Full Dynamic (with local bucket rebuild)..."
+              << std::endl;
     DelaunayClassifier clf;
     clf.set_use_outlier_removal(true);
     clf.set_output_dir("results");
@@ -407,7 +371,7 @@ int main(int argc, char *argv[]) {
       inserted.push_back({x, y});
     }
 
-    // FIX #10: MOVE (directly measured, not approximated)
+    // MOVE (directly measured via move_point / Algorithm 3)
     double total_move = 0;
     std::vector<std::pair<float, float>> moved;
     for (int i = 0; i < NUM_OPS; i++) {
@@ -434,65 +398,10 @@ int main(int argc, char *argv[]) {
           std::chrono::duration_cast<std::chrono::nanoseconds>(e - s).count();
     }
 
-    dynamic_ablation.push_back({"Full Dynamic (SRR+Buckets)",
+    dynamic_ablation.push_back({"Full Dynamic (2D Buckets)",
                                 total_insert / NUM_OPS, total_move / NUM_OPS,
-                                total_delete / NUM_OPS, "With local rebuild"});
-  }
-
-  // D2: Dynamic without SRR maintenance
-  {
-    std::cout << "[D2] Dynamic (no SRR maintenance)..." << std::endl;
-    DelaunayClassifier clf;
-    clf.set_use_outlier_removal(true);
-    clf.set_output_dir("results");
-    clf.train(train_file, 3);
-
-    // INSERT
-    double total_insert = 0;
-    std::vector<std::pair<float, float>> inserted;
-    for (int i = 0; i < NUM_OPS; i++) {
-      float x = std::get<0>(test_data[i]);
-      float y = std::get<1>(test_data[i]);
-      int label = std::get<2>(test_data[i]);
-
-      auto s = std::chrono::high_resolution_clock::now();
-      clf.insert_point(x, y, label);
-      auto e = std::chrono::high_resolution_clock::now();
-      total_insert +=
-          std::chrono::duration_cast<std::chrono::nanoseconds>(e - s).count();
-      inserted.push_back({x, y});
-    }
-
-    // MOVE
-    double total_move = 0;
-    std::vector<std::pair<float, float>> moved;
-    for (int i = 0; i < NUM_OPS; i++) {
-      float ox = inserted[i].first, oy = inserted[i].second;
-      float nx = ox + (float)move_offset, ny = oy + (float)move_offset;
-
-      auto s = std::chrono::high_resolution_clock::now();
-      clf.move_point(ox, oy, nx, ny);
-      auto e = std::chrono::high_resolution_clock::now();
-      total_move +=
-          std::chrono::duration_cast<std::chrono::nanoseconds>(e - s).count();
-      moved.push_back({nx, ny});
-    }
-
-    // DELETE
-    double total_delete = 0;
-    for (int i = NUM_OPS - 1; i >= 0; i--) {
-      float x = moved[i].first, y = moved[i].second;
-
-      auto s = std::chrono::high_resolution_clock::now();
-      clf.remove_point(x, y);
-      auto e = std::chrono::high_resolution_clock::now();
-      total_delete +=
-          std::chrono::duration_cast<std::chrono::nanoseconds>(e - s).count();
-    }
-
-    dynamic_ablation.push_back({"No SRR Maintenance", total_insert / NUM_OPS,
-                                total_move / NUM_OPS, total_delete / NUM_OPS,
-                                "CGAL DT only"});
+                                total_delete / NUM_OPS,
+                                "DT update + local bucket rebuild"});
   }
 
   print_dynamic_ablation_table(dynamic_ablation,

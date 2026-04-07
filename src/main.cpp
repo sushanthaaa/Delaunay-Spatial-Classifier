@@ -53,7 +53,7 @@ int main(int argc, char *argv[]) {
   if (mode == "static" && argc == 5) {
     std::string out_dir = argv[4];
 
-    // Train: builds DT + SRR grid - O(n log n)
+    // Train: builds DT + 2D Buckets grid - O(n log n)
     classifier.train(argv[2]);
 
     // Export visualization files for figures

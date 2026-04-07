@@ -1,5 +1,5 @@
 method,accuracy,avg_inference_us,train_time_ms,speedup_vs_knn
-FLANN C++ KNN (k=5),0.98,3.855,0.396,1
-LibSVM C++ (RBF, adaptive),0.65,4.34584,4.839,0.887056
-C++ Decision Tree (adaptive),0.95,0.0525,4.637,73.4286
-**Delaunay C++ (Ours)**,0.995,0.002915,4.329,1322.47
+FLANN C++ KNN (k=5),0.98,3.83604,0.399,1
+LibSVM C++ (RBF, adaptive),0.65,4.33292,4.866,0.885324
+C++ Decision Tree (adaptive),0.95,0.05208,2.792,73.6567
+**Delaunay C++ (Ours)**,0.995,0.00354,4.393,1083.63

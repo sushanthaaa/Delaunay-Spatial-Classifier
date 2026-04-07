@@ -1,109 +1,98 @@
 variant,accuracy,avg_inference_us,train_ms,notes,dataset
-Full Pipeline (Ours),1.0,0.0025,4.622,SRR+Outlier+HalfPlane,moons
-Without SRR Grid,1.0,0.220625,0.0,No O(1) grid hint,moons
-Without Outlier Removal,1.0,0.00208,3.114,No Phase 1 cleanup,moons
-Nearest Vertex Only (1-NN),1.0,0.52021,0.0,No half-plane boundary,moons
-2D Buckets Classification,1.0,0.00208,0.0,O(1) bucket-based path,moons
+Full Pipeline (Ours),1.0,0.003125,4.074,2D Buckets + Outlier + HalfPlane,moons
+Without 2D Buckets Grid,1.0,0.252915,0.0,DT locate walk (no O(1) grid),moons
+Without Outlier Removal,1.0,0.011875,5.992,No Phase 1 cleanup,moons
+Nearest Vertex Only (1-NN),1.0,0.570205,0.0,No half-plane boundary,moons
 Outlier multiplier=1.50,1.0,0.0,0.0,773 vertices,moons
 Outlier multiplier=2.00,1.0,0.0,0.0,786 vertices,moons
 Outlier multiplier=3.00,1.0,0.0,0.0,799 vertices,moons
 Outlier multiplier=5.00,1.0,0.0,0.0,800 vertices,moons
 Outlier multiplier=10.0,1.0,0.0,0.0,800 vertices,moons
-Full Pipeline (Ours),1.0,0.0025,4.149,SRR+Outlier+HalfPlane,circles
-Without SRR Grid,1.0,0.210415,0.0,No O(1) grid hint,circles
-Without Outlier Removal,1.0,0.00271,3.781,No Phase 1 cleanup,circles
-Nearest Vertex Only (1-NN),1.0,0.50604,0.0,No half-plane boundary,circles
-2D Buckets Classification,1.0,0.002295,0.0,O(1) bucket-based path,circles
+Full Pipeline (Ours),1.0,0.00271,4.522,2D Buckets + Outlier + HalfPlane,circles
+Without 2D Buckets Grid,1.0,0.183125,0.0,DT locate walk (no O(1) grid),circles
+Without Outlier Removal,1.0,0.00271,3.663,No Phase 1 cleanup,circles
+Nearest Vertex Only (1-NN),1.0,0.517085,0.0,No half-plane boundary,circles
 Outlier multiplier=1.50,1.0,0.0,0.0,788 vertices,circles
 Outlier multiplier=2.00,1.0,0.0,0.0,799 vertices,circles
 Outlier multiplier=3.00,1.0,0.0,0.0,800 vertices,circles
 Outlier multiplier=5.00,1.0,0.0,0.0,800 vertices,circles
 Outlier multiplier=10.0,1.0,0.0,0.0,800 vertices,circles
-Full Pipeline (Ours),0.995,0.00292,4.058,SRR+Outlier+HalfPlane,spiral
-Without SRR Grid,0.965,0.227915,0.0,No O(1) grid hint,spiral
-Without Outlier Removal,0.995,0.00396,4.041,No Phase 1 cleanup,spiral
-Nearest Vertex Only (1-NN),0.965,0.534375,0.0,No half-plane boundary,spiral
-2D Buckets Classification,0.995,0.00354,0.0,O(1) bucket-based path,spiral
+Full Pipeline (Ours),0.995,0.002915,3.982,2D Buckets + Outlier + HalfPlane,spiral
+Without 2D Buckets Grid,0.965,0.20854,0.0,DT locate walk (no O(1) grid),spiral
+Without Outlier Removal,0.995,0.00208,3.255,No Phase 1 cleanup,spiral
+Nearest Vertex Only (1-NN),0.965,0.518335,0.0,No half-plane boundary,spiral
 Outlier multiplier=1.50,0.995,0.0,0.0,787 vertices,spiral
 Outlier multiplier=2.00,0.995,0.0,0.0,796 vertices,spiral
 Outlier multiplier=3.00,0.995,0.0,0.0,796 vertices,spiral
 Outlier multiplier=5.00,0.995,0.0,0.0,796 vertices,spiral
 Outlier multiplier=10.0,0.995,0.0,0.0,796 vertices,spiral
-Full Pipeline (Ours),0.93,0.003125,3.795,SRR+Outlier+HalfPlane,gaussian_quantiles
-Without SRR Grid,0.97,0.28542,0.0,No O(1) grid hint,gaussian_quantiles
-Without Outlier Removal,0.935,0.004585,2.969,No Phase 1 cleanup,gaussian_quantiles
-Nearest Vertex Only (1-NN),0.955,0.74875,0.0,No half-plane boundary,gaussian_quantiles
-2D Buckets Classification,0.93,0.002915,0.0,O(1) bucket-based path,gaussian_quantiles
+Full Pipeline (Ours),0.93,0.002295,3.675,2D Buckets + Outlier + HalfPlane,gaussian_quantiles
+Without 2D Buckets Grid,0.97,0.27396,0.0,DT locate walk (no O(1) grid),gaussian_quantiles
+Without Outlier Removal,0.935,0.0025,3.072,No Phase 1 cleanup,gaussian_quantiles
+Nearest Vertex Only (1-NN),0.955,0.50792,0.0,No half-plane boundary,gaussian_quantiles
 Outlier multiplier=1.50,0.93,0.0,0.0,728 vertices,gaussian_quantiles
 Outlier multiplier=2.00,0.96,0.0,0.0,756 vertices,gaussian_quantiles
 Outlier multiplier=3.00,0.93,0.0,0.0,784 vertices,gaussian_quantiles
 Outlier multiplier=5.00,0.955,0.0,0.0,795 vertices,gaussian_quantiles
 Outlier multiplier=10.0,0.935,0.0,0.0,800 vertices,gaussian_quantiles
-Full Pipeline (Ours),0.996667,0.00236,6.314,SRR+Outlier+HalfPlane,cassini
-Without SRR Grid,0.996667,0.225697,0.0,No O(1) grid hint,cassini
-Without Outlier Removal,0.996667,0.00222,5.079,No Phase 1 cleanup,cassini
-Nearest Vertex Only (1-NN),0.996667,0.799443,0.0,No half-plane boundary,cassini
-2D Buckets Classification,0.996667,0.00291667,0.0,O(1) bucket-based path,cassini
+Full Pipeline (Ours),0.996667,0.0025,6.273,2D Buckets + Outlier + HalfPlane,cassini
+Without 2D Buckets Grid,0.996667,0.212777,0.0,DT locate walk (no O(1) grid),cassini
+Without Outlier Removal,0.996667,0.00208333,5.252,No Phase 1 cleanup,cassini
+Nearest Vertex Only (1-NN),0.996667,0.591803,0.0,No half-plane boundary,cassini
 Outlier multiplier=1.50,1.0,0.0,0.0,1164 vertices,cassini
 Outlier multiplier=2.00,0.996667,0.0,0.0,1186 vertices,cassini
 Outlier multiplier=3.00,0.996667,0.0,0.0,1198 vertices,cassini
 Outlier multiplier=5.00,0.996667,0.0,0.0,1199 vertices,cassini
 Outlier multiplier=10.0,0.996667,0.0,0.0,1200 vertices,cassini
-Full Pipeline (Ours),0.97,0.003125,4.054,SRR+Outlier+HalfPlane,checkerboard
-Without SRR Grid,0.97,0.18375,0.0,No O(1) grid hint,checkerboard
-Without Outlier Removal,0.97,0.00229,2.985,No Phase 1 cleanup,checkerboard
-Nearest Vertex Only (1-NN),0.97,0.484165,0.0,No half-plane boundary,checkerboard
-2D Buckets Classification,0.97,0.002295,0.0,O(1) bucket-based path,checkerboard
+Full Pipeline (Ours),0.97,0.0025,3.735,2D Buckets + Outlier + HalfPlane,checkerboard
+Without 2D Buckets Grid,0.97,0.188335,0.0,DT locate walk (no O(1) grid),checkerboard
+Without Outlier Removal,0.97,0.00208,3.025,No Phase 1 cleanup,checkerboard
+Nearest Vertex Only (1-NN),0.97,0.519795,0.0,No half-plane boundary,checkerboard
 Outlier multiplier=1.50,0.97,0.0,0.0,799 vertices,checkerboard
 Outlier multiplier=2.00,0.97,0.0,0.0,800 vertices,checkerboard
 Outlier multiplier=3.00,0.97,0.0,0.0,800 vertices,checkerboard
 Outlier multiplier=5.00,0.97,0.0,0.0,800 vertices,checkerboard
 Outlier multiplier=10.0,0.97,0.0,0.0,800 vertices,checkerboard
-Full Pipeline (Ours),1.0,0.00611,5.955,SRR+Outlier+HalfPlane,blobs
-Without SRR Grid,1.0,0.251943,0.0,No O(1) grid hint,blobs
-Without Outlier Removal,1.0,0.00291667,5.032,No Phase 1 cleanup,blobs
-Nearest Vertex Only (1-NN),1.0,0.624167,0.0,No half-plane boundary,blobs
-2D Buckets Classification,1.0,0.00305667,0.0,O(1) bucket-based path,blobs
+Full Pipeline (Ours),1.0,0.0025,5.447,2D Buckets + Outlier + HalfPlane,blobs
+Without 2D Buckets Grid,1.0,0.227083,0.0,DT locate walk (no O(1) grid),blobs
+Without Outlier Removal,1.0,0.0025,4.396,No Phase 1 cleanup,blobs
+Nearest Vertex Only (1-NN),1.0,0.547083,0.0,No half-plane boundary,blobs
 Outlier multiplier=1.50,1.0,0.0,0.0,1104 vertices,blobs
 Outlier multiplier=2.00,1.0,0.0,0.0,1149 vertices,blobs
 Outlier multiplier=3.00,1.0,0.0,0.0,1182 vertices,blobs
 Outlier multiplier=5.00,1.0,0.0,0.0,1194 vertices,blobs
 Outlier multiplier=10.0,1.0,0.0,0.0,1200 vertices,blobs
-Full Pipeline (Ours),0.955,0.001958,18.685,SRR+Outlier+HalfPlane,earthquake
-Without SRR Grid,0.955,0.357291,0.0,No O(1) grid hint,earthquake
-Without Outlier Removal,0.945,0.001917,16.679,No Phase 1 cleanup,earthquake
-Nearest Vertex Only (1-NN),0.954,0.943542,0.0,No half-plane boundary,earthquake
-2D Buckets Classification,0.955,0.002167,0.0,O(1) bucket-based path,earthquake
+Full Pipeline (Ours),0.955,0.002584,19.942,2D Buckets + Outlier + HalfPlane,earthquake
+Without 2D Buckets Grid,0.955,0.34225,0.0,DT locate walk (no O(1) grid),earthquake
+Without Outlier Removal,0.945,0.0025,17.515,No Phase 1 cleanup,earthquake
+Nearest Vertex Only (1-NN),0.954,0.677542,0.0,No half-plane boundary,earthquake
 Outlier multiplier=1.50,0.956,0.0,0.0,2916 vertices,earthquake
 Outlier multiplier=2.00,0.955,0.0,0.0,3129 vertices,earthquake
 Outlier multiplier=3.00,0.955,0.0,0.0,3378 vertices,earthquake
 Outlier multiplier=5.00,0.956,0.0,0.0,3550 vertices,earthquake
 Outlier multiplier=10.0,0.956,0.0,0.0,3713 vertices,earthquake
-Full Pipeline (Ours),0.916667,0.00694444,0.821,SRR+Outlier+HalfPlane,wine
-Without SRR Grid,0.888889,0.193278,0.0,No O(1) grid hint,wine
-Without Outlier Removal,0.888889,0.00347222,0.557,No Phase 1 cleanup,wine
-Nearest Vertex Only (1-NN),0.888889,0.523139,0.0,No half-plane boundary,wine
-2D Buckets Classification,0.916667,0.00347222,0.0,O(1) bucket-based path,wine
+Full Pipeline (Ours),0.916667,0.00580556,0.811,2D Buckets + Outlier + HalfPlane,wine
+Without 2D Buckets Grid,0.888889,0.226861,0.0,DT locate walk (no O(1) grid),wine
+Without Outlier Removal,0.888889,0.00347222,0.553,No Phase 1 cleanup,wine
+Nearest Vertex Only (1-NN),0.888889,0.454861,0.0,No half-plane boundary,wine
 Outlier multiplier=1.50,0.888889,0.0,0.0,134 vertices,wine
 Outlier multiplier=2.00,0.916667,0.0,0.0,138 vertices,wine
 Outlier multiplier=3.00,0.916667,0.0,0.0,140 vertices,wine
 Outlier multiplier=5.00,0.916667,0.0,0.0,140 vertices,wine
 Outlier multiplier=10.0,0.916667,0.0,0.0,140 vertices,wine
-Full Pipeline (Ours),0.929825,0.00292105,2.176,SRR+Outlier+HalfPlane,cancer
-Without SRR Grid,0.938596,0.166307,0.0,No O(1) grid hint,cancer
-Without Outlier Removal,0.894737,0.00292105,1.7,No Phase 1 cleanup,cancer
-Nearest Vertex Only (1-NN),0.912281,0.479167,0.0,No half-plane boundary,cancer
-2D Buckets Classification,0.929825,0.00219298,0.0,O(1) bucket-based path,cancer
+Full Pipeline (Ours),0.929825,0.00365789,2.246,2D Buckets + Outlier + HalfPlane,cancer
+Without 2D Buckets Grid,0.938596,0.16557,0.0,DT locate walk (no O(1) grid),cancer
+Without Outlier Removal,0.894737,0.00292982,1.689,No Phase 1 cleanup,cancer
+Nearest Vertex Only (1-NN),0.912281,0.472588,0.0,No half-plane boundary,cancer
 Outlier multiplier=1.50,0.912281,0.0,0.0,390 vertices,cancer
 Outlier multiplier=2.00,0.903509,0.0,0.0,402 vertices,cancer
 Outlier multiplier=3.00,0.929825,0.0,0.0,428 vertices,cancer
 Outlier multiplier=5.00,0.912281,0.0,0.0,433 vertices,cancer
 Outlier multiplier=10.0,0.894737,0.0,0.0,446 vertices,cancer
-Full Pipeline (Ours),0.330897,0.00249693,29.778,SRR+Outlier+HalfPlane,bloodmnist
-Without SRR Grid,0.320374,0.617278,0.0,No O(1) grid hint,bloodmnist
-Without Outlier Removal,0.209003,0.00185151,40.156,No Phase 1 cleanup,bloodmnist
-Nearest Vertex Only (1-NN),0.320666,0.889591,0.0,No half-plane boundary,bloodmnist
-2D Buckets Classification,0.330897,0.00181497,0.0,O(1) bucket-based path,bloodmnist
+Full Pipeline (Ours),0.330897,0.00183923,29.969,2D Buckets + Outlier + HalfPlane,bloodmnist
+Without 2D Buckets Grid,0.320374,0.60287,0.0,DT locate walk (no O(1) grid),bloodmnist
+Without Outlier Removal,0.209003,0.00202163,39.412,No Phase 1 cleanup,bloodmnist
+Nearest Vertex Only (1-NN),0.320666,0.871931,0.0,No half-plane boundary,bloodmnist
 Outlier multiplier=1.50,0.336744,0.0,0.0,3745 vertices,bloodmnist
 Outlier multiplier=2.00,0.323005,0.0,0.0,4288 vertices,bloodmnist
 Outlier multiplier=3.00,0.330897,0.0,0.0,5026 vertices,bloodmnist

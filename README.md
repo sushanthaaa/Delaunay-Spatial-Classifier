@@ -48,7 +48,7 @@ Results from experiments on **MacBook Pro M3, macOS 26, 16GB RAM** with **Unifie
 
 | Metric | Result | Baseline Comparison |
 |--------|--------|---------------------|
-| **Inference Speed** | 0.002–0.007 µs/point | **482×–3,989× faster** than FLANN KNN (C++) |
+| **Inference Speed** | 0.002–0.006 µs/point | **594×–3,989× faster** than FLANN KNN (C++) |
 | **Accuracy (Spatial)** | 93–100% | Best or tied-best on 7/11 datasets |
 | **Dynamic Insert** | 37K–989K ns | **2×–141× faster** than Decision Tree rebuild |
 | **Scalability** | O(1) inference verified | Flat at ~0.01 µs from 100 to 100K points |
@@ -514,16 +514,16 @@ All algorithms implemented in C++ with -O3 optimization. Test data: `_test_y.csv
 
 | Dataset | KNN | SVM | Decision Tree | **Ours** | **Speedup vs KNN** |
 |---------|-----|-----|---------------|----------|:------------------:|
-| moons | 4.052 | 0.765 | 0.017 | **0.0027** | **1,495×** |
-| circles | 3.850 | 0.326 | 0.013 | **0.0027** | **1,421×** |
-| spiral | 3.855 | 4.346 | 0.053 | **0.0029** | **1,322×** |
-| gaussian_quantiles | 4.395 | 1.134 | 0.024 | **0.0029** | **1,508×** |
-| cassini | 4.305 | 0.699 | 0.011 | **0.0026** | **1,631×** |
-| checkerboard | 4.396 | 1.557 | 0.015 | **0.0027** | **1,622×** |
-| blobs | 4.488 | 0.335 | 0.009 | **0.0028** | **1,616×** |
-| earthquake | 5.568 | 5.697 | 0.062 | **0.0020** | **2,728×** |
-| wine | 3.345 | 0.374 | 0.019 | **0.0069** | **482×** |
-| cancer | 4.082 | 0.591 | 0.022 | **0.0036** | **1,119×** |
+| moons | 4.026 | 0.753 | 0.017 | **0.0025** | **1,610×** |
+| circles | 3.896 | 0.310 | 0.014 | **0.0027** | **1,438×** |
+| spiral | 3.836 | 4.333 | 0.052 | **0.0035** | **1,084×** |
+| gaussian_quantiles | 4.595 | 1.098 | 0.024 | **0.0025** | **1,838×** |
+| cassini | 4.131 | 0.702 | 0.012 | **0.0026** | **1,565×** |
+| checkerboard | 4.494 | 1.570 | 0.016 | **0.0029** | **1,542×** |
+| blobs | 4.327 | 0.335 | 0.009 | **0.0022** | **1,946×** |
+| earthquake | 5.468 | 5.663 | 0.072 | **0.0027** | **2,019×** |
+| wine | 3.447 | 0.380 | 0.020 | **0.0058** | **594×** |
+| cancer | 4.148 | 0.595 | 0.022 | **0.0036** | **1,137×** |
 | bloodmnist | 7.142 | 134.157 | 0.099 | **0.0018** | **3,989×** |
 
 ### C++ Dynamic Update Speed
@@ -542,10 +542,10 @@ All algorithms implemented in C++ with -O3 optimization. Test data: `_test_y.csv
 
 | n | Training (ms) | Inference (µs/point) |
 |------|--------------|---------------------|
-| 100 | 28.34 | 0.00 |
-| 1,000 | 34.67 | 0.00 |
-| 10,000 | 90.94 | 0.01 |
-| 100,000 | 802.55 | 0.01 |
+| 100 | 32.86 | 0.00 |
+| 1,000 | 35.68 | 0.01 |
+| 10,000 | 91.65 | 0.01 |
+| 100,000 | 844.41 | 0.02 |
 
 > **Key insight:** Inference time remains **constant** regardless of training set size, validating the O(1) claim.
 
