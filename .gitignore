@@ -66,21 +66,19 @@ data/medmnist/
 # Results (Regenerate via benchmark scripts)
 # Keep only summary CSVs, exclude intermediate files
 # ------------------------------------------------------------------------------
-results/*_clean_points.csv
-results/triangles.csv
-results/boundaries.csv
-results/predictions.csv
-results/dynamic_*.csv
-results/scalability_plots.png
+results/*.csv
+results/*.txt
+results/*.log
 results/logs/
 results/figures/
 
-# ------------------------------------------------------------------------------
-# Private/Unpublished
-# ------------------------------------------------------------------------------
-papers/
-drafts/
-*.draft.md
+!results/cv_summary.csv
+!results/ablation_summary.csv
+!results/ablation_dynamic_summary.csv
+!results/scalability_train.csv
+!results/scalability_inference.csv
+!results/bucket_type_distribution.csv
+!results/significance_tests.csv
 
 # ------------------------------------------------------------------------------
 # Large Binary Files

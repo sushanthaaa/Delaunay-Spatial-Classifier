@@ -1,2 +1,0 @@
-variant,avg_insert_ns,avg_move_ns,avg_delete_ns,notes
-Full Dynamic (2D Buckets),652254,1.28112e+06,642024,DT update + local bucket rebuild

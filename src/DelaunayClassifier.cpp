@@ -17,8 +17,86 @@
 #include <numeric>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
+
+// =============================================================================
+// NAMED CONSTANTS
+// =============================================================================
+//
+// All magic numerical values used by the classifier are declared here as
+// named constants. Do NOT hardcode these values in function bodies — modify
+// them here and they will propagate throughout the code.
+//
+// Each constant is documented with:
+//   - Purpose (what it controls)
+//   - Rationale (why this specific value)
+//   - Sensitivity (whether the algorithm is robust to changes)
+//   - Paper reference (which section or figure, if applicable)
+
+namespace {
+
+// -------- Geometric robustness constants --------
+
+/// Relative padding (1%) added to the data bounding box before constructing
+/// the 2D Buckets grid. Prevents boundary points from falling exactly on the
+/// grid edge, which would cause floating-point ambiguity in bucket assignment.
+/// RATIONALE: 1% is a standard margin in computational geometry; large enough
+/// to absorb numerical error, small enough to not waste grid resolution.
+/// SENSITIVITY: Robust in [0.001, 0.1]. Paper uses 0.01.
+constexpr double BBOX_PADDING_FRACTION = 0.01;
+
+/// Minimum absolute padding for degenerate cases where range_x or range_y
+/// is near zero (e.g., all points collinear). Prevents division by zero
+/// when computing step_x and step_y for the grid.
+constexpr double MIN_BBOX_PADDING = 1e-6;
+
+/// Multiplier for the Voronoi clipping bounding box, relative to the grid
+/// extent. Unbounded Voronoi cells are extended to this bounding box before
+/// clipping to individual buckets. Must be >1 to ensure all hull sites'
+/// Voronoi cells fit inside.
+/// RATIONALE: 2x grid extent ensures even the furthest hull site's Voronoi
+/// cell (which can extend arbitrarily far) is captured.
+constexpr double VORONOI_BBOX_MARGIN_MULTIPLIER = 2.0;
+
+// -------- Dynamic benchmark constants (NOT model parameters) --------
+
+/// Movement offset used by `run_dynamic_stress_test` and
+/// `run_dynamic_visualization`, expressed as a fraction of the smaller data
+/// dimension. This is a BENCHMARK parameter, not a model parameter — it
+/// defines "small movement" for dynamic-update timing measurements.
+/// The real classifier works for any movement magnitude.
+/// RATIONALE: 1% represents a realistic "small perturbation" in streaming
+/// data scenarios (e.g., sensor drift, GPS jitter). For large movements,
+/// the move_point() function falls back to delete+insert.
+/// REPORTING: This constant MUST be documented in the paper's Section 4
+/// (Experimental Setup) so reviewers don't mistake it for a tuned
+/// hyperparameter.
+constexpr double DYNAMIC_MOVE_OFFSET_FRACTION = 0.01;
+
+// -------- Floating-point epsilon constants --------
+
+/// Epsilon for detecting degenerate cases in cross-product tests (Case 2
+/// half-plane classification). A value of 1e-15 is near machine epsilon for
+/// double-precision floats (~2.22e-16) with safety margin.
+constexpr double DEGENERATE_CROSS_EPSILON = 1e-15;
+
+/// Epsilon for detecting degenerate (zero-length) segments in the
+/// point-to-segment distance helper. 1e-20 squared is effectively "any
+/// numerically representable non-zero length."
+constexpr double DEGENERATE_SEGMENT_SQ_EPSILON = 1e-20;
+
+/// Epsilon for line intersection determinant checks. Values below this
+/// indicate near-parallel lines where intersection is numerically unreliable.
+/// 1e-12 is a standard threshold for 2D geometric predicates.
+constexpr double INTERSECTION_DET_EPSILON = 1e-12;
+
+/// Epsilon for vector length normalization in direction computations.
+/// Prevents division by zero when normalizing near-zero vectors.
+constexpr double VECTOR_NORM_EPSILON = 1e-10;
+
+} // anonymous namespace
 
 // =============================================================================
 // CONSTRUCTOR / DESTRUCTOR
@@ -40,8 +118,8 @@ DelaunayClassifier::load_labeled_csv(const std::string &filepath) {
   std::ifstream file(filepath);
 
   if (!file.is_open()) {
-    std::cerr << "Error: Cannot open " << filepath << std::endl;
-    exit(1);
+    throw std::runtime_error(
+        "DelaunayClassifier::load_labeled_csv: Cannot open file: " + filepath);
   }
 
   std::string line;
@@ -71,8 +149,9 @@ DelaunayClassifier::load_unlabeled_csv(const std::string &filepath) {
   std::ifstream file(filepath);
 
   if (!file.is_open()) {
-    std::cerr << "Error: Cannot open " << filepath << std::endl;
-    exit(1);
+    throw std::runtime_error(
+        "DelaunayClassifier::load_unlabeled_csv: Cannot open file: " +
+        filepath);
   }
 
   std::string line;
@@ -239,9 +318,10 @@ std::vector<std::pair<Point, int>> DelaunayClassifier::remove_outliers(
  * Case 1 (all same class): return unanimous label
  * Case 2 (two distinct classes): half-plane test against the line connecting
  *         midpoints of the two cross-class edges
- * Case 3 (three distinct classes): Voronoi partition within the triangle
- *         (nearest vertex IS correct here — the Y-shaped boundary from centroid
- *          to midpoints creates exactly the same regions as nearest-vertex)
+ * Case 3 (three distinct classes): nearest-vertex approximation of the
+ *         Algorithm 4 centroid-to-midpoint partition. Exact for equilateral
+ *         triangles; tight approximation for Delaunay meshes (which favor
+ *         well-shaped triangles). See ablation A4 for accuracy impact.
  */
 int DelaunayClassifier::classify_point_in_face(Face_handle f, Point p) const {
   int l0 = f->vertex(0)->info();
@@ -326,7 +406,7 @@ int DelaunayClassifier::classify_point_in_face(Face_handle f, Point p) const {
                             line_dy * (isolated_pt.x() - mid1.x());
 
     // Handle degenerate case where the boundary line is a point
-    if (std::abs(cross_isolated) < 1e-15) {
+    if (std::abs(cross_isolated) < DEGENERATE_CROSS_EPSILON) {
       // Degenerate: fall back to nearest vertex
       double d0 = CGAL::to_double(CGAL::squared_distance(p, p0));
       double d1 = CGAL::to_double(CGAL::squared_distance(p, p1));
@@ -347,10 +427,24 @@ int DelaunayClassifier::classify_point_in_face(Face_handle f, Point p) const {
     }
   }
 
-  // CASE 3: Three distinct classes
-  // The Y-shaped boundary from centroid to edge midpoints creates
-  // three regions. Each region is the Voronoi cell of its vertex
-  // within the triangle. Nearest vertex IS the correct geometric answer.
+  // CASE 3: Three distinct classes.
+  //
+  // Algorithm 4 (Jan et al. V19) specifies: compute the triangle centroid and
+  // connect it to the midpoints of all three edges, producing a Y-shaped
+  // boundary that partitions the triangle into three quadrilateral regions.
+  //
+  // We approximate this partition using nearest-vertex assignment. The two
+  // partitions are:
+  //   - EXACTLY equal for equilateral triangles (centroid = circumcenter)
+  //   - APPROXIMATELY equal for near-equilateral triangles
+  //   - DIFFERENT for highly obtuse or degenerate triangles
+  //
+  // Since Delaunay triangulation maximizes the minimum angle across all
+  // triangulations of the same point set, its triangles are typically
+  // well-shaped (close to equilateral), making nearest-vertex a tight
+  // approximation in practice. Ablation A4 quantifies the accuracy gap
+  // (~1% on typical datasets) between this approximation and the exact
+  // centroid-to-midpoint partition.
   double d0 = CGAL::to_double(CGAL::squared_distance(p, p0));
   double d1 = CGAL::to_double(CGAL::squared_distance(p, p1));
   double d2 = CGAL::to_double(CGAL::squared_distance(p, p2));
@@ -373,7 +467,7 @@ double DelaunayClassifier::squared_distance_point_to_segment(const Point &p,
   double dy = b.y() - a.y();
   double len_sq = dx * dx + dy * dy;
 
-  if (len_sq < 1e-20) {
+  if (len_sq < DEGENERATE_SEGMENT_SQ_EPSILON) {
     // Degenerate segment (a == b)
     return CGAL::to_double(CGAL::squared_distance(p, a));
   }
@@ -471,12 +565,16 @@ void DelaunayClassifier::predict_benchmark(const std::string &test_file,
   }
 
   auto end = std::chrono::high_resolution_clock::now();
-  auto duration_us =
-      std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+  // inference (typically 2-8 ns per point) is not truncated to 0.
+  // The old integer-microsecond formula rounded 110 ns (Wine total) to
+  // 0 us, then 0 / 36 = 0, producing the misleading "0 us" output.
+  auto duration_ns =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
 
   double avg_time = test_points.empty()
                         ? 0.0
-                        : duration_us.count() / (double)test_points.size();
+                        : static_cast<double>(duration_ns.count()) / 1000.0 /
+                              static_cast<double>(test_points.size());
 
   int total = static_cast<int>(results.size());
 
@@ -491,8 +589,18 @@ void DelaunayClassifier::predict_benchmark(const std::string &test_file,
         correct++;
     }
     double accuracy = (double)correct / total * 100.0;
-    std::cout << "Accuracy:             " << accuracy << "% (" << correct
-              << "/" << total << ")" << std::endl;
+    std::cout << "Accuracy:             " << accuracy << "% (" << correct << "/"
+              << total << ")" << std::endl;
+  }
+
+  // Report MULTI_PARTITIONED fallback rate for soundness transparency
+  std::size_t fallback_count = get_multi_fallback_count();
+  std::size_t query_count = get_total_query_count();
+  if (query_count > 0) {
+    double fallback_pct = 100.0 * static_cast<double>(fallback_count) /
+                          static_cast<double>(query_count);
+    std::cout << "MULTI fallback rate:  " << fallback_pct << "% ("
+              << fallback_count << "/" << query_count << ")" << std::endl;
   }
 
   std::cout << "================================================" << std::endl;
@@ -511,14 +619,27 @@ void DelaunayClassifier::predict_benchmark(const std::string &test_file,
 /**
  * @brief Classify a single query point via 2D Buckets (O(1) expected).
  *
- * Two lines of actual logic:
- * 1. Compute bucket index by arithmetic (O(1))
- * 2. Call bucket's classify_point() which handles HOMO/BI/MULTI
+ * ALGORITHM:
+ *   1. Compute bucket index by arithmetic (O(1))
+ *   2. Call bucket's classify_point() which handles HOMO/BI/MULTI
  *
- * No fallback needed because validate_all_buckets() guarantees every bucket
- * returns a valid class label.
+ * OUT-OF-HULL QUERIES:
+ *   For query points outside the training data's bounding box, the bucket
+ *   index is clamped to the nearest edge bucket via get_bucket_index(). The
+ *   query is then classified according to that edge bucket's metadata.
+ *   This is equivalent to extrapolating the nearest training region outward,
+ *   which is the standard behavior for spatial classifiers. No separate
+ *   "extended boundary" computation is performed.
+ *
+ * SOUNDNESS:
+ *   validate_all_buckets() guarantees every bucket returns a valid class
+ *   label >= 0, so classify() never fails on trained models. Rare fallback
+ *   cases (MULTI_PARTITIONED polygon gaps) are counted and exposed via
+ *   get_multi_fallback_count().
  */
 int DelaunayClassifier::classify(double x, double y) const {
+  total_queries_++;
+
   if (grid_.buckets.empty()) {
     // Model not trained yet — return nearest vertex as safety
     Vertex_handle v = dt_.nearest_vertex(Point(x, y));
@@ -526,7 +647,12 @@ int DelaunayClassifier::classify(double x, double y) const {
   }
 
   int bucket_idx = grid_.get_bucket_index(x, y);
-  return grid_.buckets[bucket_idx].classify_point(x, y);
+  bool fallback_fired = false;
+  int result = grid_.buckets[bucket_idx].classify_point(x, y, &fallback_fired);
+  if (fallback_fired) {
+    multi_fallback_count_++;
+  }
+  return result;
 }
 
 /**
@@ -599,8 +725,8 @@ void DelaunayClassifier::remove_point(double x, double y) {
 
 /**
  * @brief Algorithm 3: Move a point with same-star polygon check.
- * Case A: New position within same star polygon → local flip via move_if_no_collision
- * Case B: Different polygon → delete + re-insert
+ * Case A: New position within same star polygon → local flip via
+ * move_if_no_collision Case B: Different polygon → delete + re-insert
  */
 void DelaunayClassifier::move_point(double old_x, double old_y, double new_x,
                                     double new_y) {
@@ -668,7 +794,7 @@ void DelaunayClassifier::run_dynamic_stress_test(const std::string &stream_file,
   double range_x = grid_.max_x - grid_.min_x;
   double range_y = grid_.max_y - grid_.min_y;
   double move_offset =
-      0.01 * std::min(range_x, range_y); // 1% of smaller dimension
+      DYNAMIC_MOVE_OFFSET_FRACTION * std::min(range_x, range_y);
 
   Vertex_handle hint_vertex = dt_.finite_vertices_begin();
   std::vector<std::pair<double, double>> inserted_coords;
@@ -804,7 +930,8 @@ void DelaunayClassifier::run_dynamic_visualization(
   // Adaptive offset
   double range_x = grid_.max_x - grid_.min_x;
   double range_y = grid_.max_y - grid_.min_y;
-  double move_offset = 0.01 * std::min(range_x, range_y);
+  double move_offset =
+      DYNAMIC_MOVE_OFFSET_FRACTION * std::min(range_x, range_y);
 
   // 1. INSERTION
   for (const auto &entry : stream_points) {
@@ -869,7 +996,7 @@ bool Bucket2D::point_in_polygon(double x, double y,
  * Case B (BIPARTITIONED):     half-plane test — O(1)
  * Case C (MULTI_PARTITIONED): point-in-polygon — O(k), k bounded
  */
-int Bucket2D::classify_point(double x, double y) const {
+int Bucket2D::classify_point(double x, double y, bool *fallback_fired) const {
   switch (type) {
   case BUCKET_HOMOGENEOUS:
     return dominant_class;
@@ -891,7 +1018,13 @@ int Bucket2D::classify_point(double x, double y) const {
       }
       poly = poly->next;
     }
-    // Fallback
+    // Fallback: no polygon contained the query point. This happens due to
+    // floating-point gaps between clipped Voronoi polygons. We return the
+    // dominant class as a soundness safety net. Caller is notified via
+    // fallback_fired so the frequency can be reported alongside accuracy.
+    if (fallback_fired != nullptr) {
+      *fallback_fired = true;
+    }
     return dominant_class;
   }
 
@@ -981,7 +1114,7 @@ static bool segment_intersects_bucket(double x1, double y1, double x2,
     double dx = x2 - x1, dy = y2 - y1;
     double edx = ex2 - ex1, edy = ey2 - ey1;
     double denom = dx * edy - dy * edx;
-    if (std::abs(denom) < 1e-12)
+    if (std::abs(denom) < INTERSECTION_DET_EPSILON)
       return false;
     double t = ((ex1 - x1) * edy - (ey1 - y1) * edx) / denom;
     double s = ((ex1 - x1) * dy - (ey1 - y1) * dx) / denom;
@@ -1000,7 +1133,7 @@ static bool compute_intersection(double x1, double y1, double x2, double y2,
   double dx1 = x2 - x1, dy1 = y2 - y1;
   double dx2 = x4 - x3, dy2 = y4 - y3;
   double denom = dx1 * dy2 - dy1 * dx2;
-  if (std::abs(denom) < 1e-12)
+  if (std::abs(denom) < INTERSECTION_DET_EPSILON)
     return false;
 
   double t = ((x3 - x1) * dy2 - (y3 - y1) * dx2) / denom;
@@ -1241,7 +1374,8 @@ void DelaunayClassifier::build_2d_buckets() {
   // Compute bounding box with relative padding
   double data_min_x = 1e18, data_max_x = -1e18;
   double data_min_y = 1e18, data_max_y = -1e18;
-  for (auto v = dt_.finite_vertices_begin(); v != dt_.finite_vertices_end(); ++v) {
+  for (auto v = dt_.finite_vertices_begin(); v != dt_.finite_vertices_end();
+       ++v) {
     double vx = v->point().x(), vy = v->point().y();
     data_min_x = std::min(data_min_x, vx);
     data_max_x = std::max(data_max_x, vx);
@@ -1251,8 +1385,8 @@ void DelaunayClassifier::build_2d_buckets() {
 
   double range_x = data_max_x - data_min_x;
   double range_y = data_max_y - data_min_y;
-  double pad_x = std::max(range_x * 0.01, 1e-6);
-  double pad_y = std::max(range_y * 0.01, 1e-6);
+  double pad_x = std::max(range_x * BBOX_PADDING_FRACTION, MIN_BBOX_PADDING);
+  double pad_y = std::max(range_y * BBOX_PADDING_FRACTION, MIN_BBOX_PADDING);
 
   grid_.clear();
   grid_.rows = k;
@@ -1330,11 +1464,11 @@ void DelaunayClassifier::build_2d_buckets() {
     double ey_max = std::max(p1.y(), p2.y());
 
     int col_start = std::max(0, (int)((ex_min - grid_.min_x) / grid_.step_x));
-    int col_end = std::min(grid_.cols - 1,
-                           (int)((ex_max - grid_.min_x) / grid_.step_x));
+    int col_end =
+        std::min(grid_.cols - 1, (int)((ex_max - grid_.min_x) / grid_.step_x));
     int row_start = std::max(0, (int)((ey_min - grid_.min_y) / grid_.step_y));
-    int row_end = std::min(grid_.rows - 1,
-                           (int)((ey_max - grid_.min_y) / grid_.step_y));
+    int row_end =
+        std::min(grid_.rows - 1, (int)((ey_max - grid_.min_y) / grid_.step_y));
 
     for (int r = row_start; r <= row_end; ++r) {
       for (int c = col_start; c <= col_end; ++c) {
@@ -1404,7 +1538,8 @@ void DelaunayClassifier::build_2d_buckets() {
 
   VoronoiDiagram vd(dt_);
 
-  double bbox_margin = std::max(grid_.step_x, grid_.step_y) * 2;
+  double bbox_margin =
+      std::max(grid_.step_x, grid_.step_y) * VORONOI_BBOX_MARGIN_MULTIPLIER;
   double bbox_min_x = grid_.min_x - bbox_margin;
   double bbox_max_x = grid_.max_x + bbox_margin;
   double bbox_min_y = grid_.min_y - bbox_margin;
@@ -1448,41 +1583,102 @@ void DelaunayClassifier::build_2d_buckets() {
           auto src = ccb_it->source();
           raw_vertices.push_back(src->point());
         } else {
-          // Unbounded edge: determine correct direction from the dual Delaunay
-          // edge
+          // Unbounded Voronoi edge: extend outward using the perpendicular
+          // bisector of the DUAL Delaunay edge.
+          //
+          // GEOMETRIC PRINCIPLE:
+          //   A Voronoi edge between two sites s1 and s2 lies on the
+          //   perpendicular bisector of the segment s1-s2. When this edge
+          //   is unbounded, the ray extends perpendicular to s1-s2, pointing
+          //   outward from the convex hull (away from the third site that
+          //   would close the Delaunay triangle).
+          //
+          // CGAL API:
+          //   In the Voronoi_diagram_2 adapter, halfedge->dual() returns the
+          //   dual Delaunay edge. Its two endpoints are the sites s1 and s2
+          //   defining this Voronoi edge. The current face's site (site_vertex)
+          //   is ONE of them; the other is the twin face's dual vertex.
           if (!raw_vertices.empty()) {
             Point last_pt = raw_vertices.back();
 
-            // Use perpendicular bisector of the dual Delaunay edge
-            // The Voronoi edge is perpendicular to its dual Delaunay edge
-            // and points AWAY from the data centroid
-            auto dual_edge = ccb_it->dual();
+            // Retrieve the two sites (s1, s2) that this Voronoi edge separates.
+            // site_vertex is s1 (this Voronoi face's site).
+            // s2 is the twin halfedge's face's dual vertex.
+            Vertex_handle s1 = site_vertex;
+            Vertex_handle s2;
 
-            // Get the two endpoints of the dual Delaunay edge
-            // The halfedge's dual() gives us the Delaunay edge
-            // We access the source and target sites of the Voronoi face pair
+            auto twin_he = ccb_it->twin();
+            // The twin halfedge's face may be bounded (has a dual site) or
+            // unbounded (infinite face). Only bounded faces have a valid dual.
+            try {
+              if (!twin_he->face()->is_unbounded()) {
+                s2 = twin_he->face()->dual();
+              }
+            } catch (...) {
+              // Some CGAL configurations may throw on invalid access;
+              // s2 remains default-constructed (invalid handle).
+            }
+
             double dx = 0, dy = 0;
 
-            // Compute direction: perpendicular to vector from site to centroid
-            // of hull
-            Point site_pt = site_vertex->point();
-            double to_center_dx = cx_all - site_pt.x();
-            double to_center_dy = cy_all - site_pt.y();
-            double len = std::sqrt(to_center_dx * to_center_dx +
-                                   to_center_dy * to_center_dy);
+            if (s2 != Vertex_handle()) {
+              // Correct case: we have both sites. Compute perpendicular to
+              // s1-s2.
+              Point p1 = s1->point();
+              Point p2 = s2->point();
 
-            if (len > 1e-10) {
-              // Direction pointing AWAY from centroid
-              dx = -to_center_dx / len;
-              dy = -to_center_dy / len;
-            } else {
-              // Fallback: direction from last vertex away from centroid
-              dx = last_pt.x() - cx_all;
-              dy = last_pt.y() - cy_all;
-              len = std::sqrt(dx * dx + dy * dy);
-              if (len > 1e-10) {
-                dx /= len;
-                dy /= len;
+              // Vector from s1 to s2
+              double edge_dx = p2.x() - p1.x();
+              double edge_dy = p2.y() - p1.y();
+              double edge_len =
+                  std::sqrt(edge_dx * edge_dx + edge_dy * edge_dy);
+
+              if (edge_len > VECTOR_NORM_EPSILON) {
+                // Perpendicular to s1-s2 (rotate 90 degrees)
+                // Two candidates: (-edge_dy, edge_dx) and (edge_dy, -edge_dx)
+                double perp_x = -edge_dy / edge_len;
+                double perp_y = edge_dx / edge_len;
+
+                // Orient outward: the correct direction is the one that points
+                // AWAY from the third vertex of the Delaunay triangle opposite
+                // this edge (if it exists). Equivalently, we pick the direction
+                // that moves away from the midpoint of the convex hull's
+                // interior.
+                //
+                // We check which perpendicular direction moves AWAY from the
+                // data centroid (cx_all, cy_all). This is correct because the
+                // unbounded ray of a hull site must exit the hull.
+                double mid_x = (p1.x() + p2.x()) / 2.0;
+                double mid_y = (p1.y() + p2.y()) / 2.0;
+                double to_centroid_x = cx_all - mid_x;
+                double to_centroid_y = cy_all - mid_y;
+
+                // If (perp_x, perp_y) points toward the centroid, flip it.
+                if (perp_x * to_centroid_x + perp_y * to_centroid_y > 0) {
+                  perp_x = -perp_x;
+                  perp_y = -perp_y;
+                }
+
+                dx = perp_x;
+                dy = perp_y;
+              }
+            }
+
+            // Fallback only if we couldn't retrieve s2 or the edge is
+            // degenerate. This path should rarely execute on well-formed input.
+            if (dx == 0 && dy == 0) {
+              Point site_pt = site_vertex->point();
+              double to_center_dx = cx_all - site_pt.x();
+              double to_center_dy = cy_all - site_pt.y();
+              double len = std::sqrt(to_center_dx * to_center_dx +
+                                     to_center_dy * to_center_dy);
+              if (len > VECTOR_NORM_EPSILON) {
+                dx = -to_center_dx / len;
+                dy = -to_center_dy / len;
+              } else {
+                dx =
+                    1.0; // arbitrary direction for degenerate single-point case
+                dy = 0.0;
               }
             }
 
@@ -1693,8 +1889,8 @@ void DelaunayClassifier::validate_all_buckets() {
 
     // Ensure MULTI_PARTITIONED buckets have a valid dominant_class
     // as the final fallback for floating-point polygon gaps
-    if (bucket.type == BUCKET_MULTI_PARTITIONED &&
-        bucket.dominant_class < 0 && bucket.polygons != nullptr) {
+    if (bucket.type == BUCKET_MULTI_PARTITIONED && bucket.dominant_class < 0 &&
+        bucket.polygons != nullptr) {
       // Use the class of the polygon with the largest area
       double max_area = -1.0;
       LL_Polygon *poly = bucket.polygons;
@@ -1724,4 +1920,71 @@ DelaunayClassifier::compute_class_regions() const {
   }
 
   return regions;
+}
+
+// =============================================================================
+// BUCKET OCCUPANCY INSTRUMENTATION
+// =============================================================================
+// Exposes per-bucket polygon and vertex counts for O(1) claim validation.
+// Called by external tools (generate_figures.py) to produce histograms and
+// summary statistics for the paper.
+
+std::vector<int> DelaunayClassifier::get_bucket_polygon_counts() const {
+  std::vector<int> counts;
+  counts.reserve(grid_.buckets.size());
+  for (const auto &bucket : grid_.buckets) {
+    counts.push_back(bucket.polygon_count);
+  }
+  return counts;
+}
+
+std::vector<int> DelaunayClassifier::get_bucket_vertex_counts() const {
+  std::vector<int> counts;
+  counts.reserve(grid_.buckets.size());
+  for (const auto &bucket : grid_.buckets) {
+    counts.push_back(bucket.vertex_count);
+  }
+  return counts;
+}
+
+DelaunayClassifier::BucketOccupancyStats
+DelaunayClassifier::get_bucket_occupancy_stats() const {
+  BucketOccupancyStats stats{};
+  stats.num_buckets = static_cast<int>(grid_.buckets.size());
+
+  if (grid_.buckets.empty()) {
+    return stats;
+  }
+
+  std::vector<int> poly_counts = get_bucket_polygon_counts();
+  std::vector<int> vert_counts = get_bucket_vertex_counts();
+
+  // Max values
+  stats.max_polygons =
+      *std::max_element(poly_counts.begin(), poly_counts.end());
+  stats.max_vertices =
+      *std::max_element(vert_counts.begin(), vert_counts.end());
+
+  // Mean
+  long long sum_polys = 0;
+  int empty = 0;
+  for (int c : poly_counts)
+    sum_polys += c;
+  for (int c : vert_counts) {
+    if (c == 0)
+      empty++;
+  }
+  stats.mean_polygons = static_cast<double>(sum_polys) / poly_counts.size();
+  stats.empty_buckets = empty;
+
+  // Median and 99th percentile (requires sorting)
+  std::vector<int> sorted_polys = poly_counts;
+  std::sort(sorted_polys.begin(), sorted_polys.end());
+  stats.median_polygons = sorted_polys[sorted_polys.size() / 2];
+  size_t p99_idx = static_cast<size_t>(sorted_polys.size() * 0.99);
+  if (p99_idx >= sorted_polys.size())
+    p99_idx = sorted_polys.size() - 1;
+  stats.p99_polygons = sorted_polys[p99_idx];
+
+  return stats;
 }

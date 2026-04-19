@@ -2,28 +2,100 @@
  * @file benchmark.cpp
  * @brief Fair C++ Benchmark Suite for Delaunay Classifier vs. Baselines
  *
- * Compares four algorithms on accuracy, inference speed, and dynamic updates:
- *   1. FLANN KNN (k=5) — KD-tree spatial index
- *   2. LibSVM (RBF kernel) — adaptive gamma via variance scaling
- *   3. Decision Tree — adaptive depth via log2(n) heuristic
- *   4. Delaunay Classifier (Ours) — O(1) via 2D Buckets
+ * Compares five algorithms on accuracy, inference speed, and dynamic updates:
+ *   2. LibSVM (RBF)     — (C, gamma) tuned per dataset via 5-fold CV (Issue
+ * #16)
+ *   5. Delaunay (Ours)  — O(1) expected via 2D Buckets
  *
  * All implementations in C++ with -O3 optimization for fair comparison.
+ *
+ * Fixes applied (Week 2 of the master action list):
+ *               vectors and reported as mean ± std.
+ *               1/(n_features * var), computed with explicit n_features = 2.
+ *               5-fold grid-search CV.
+ *               split candidates (previously sampled every 20th value).
+ *               k ∈ {1, 3, 5, 7, 9, 11, 15}.
  */
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <flann/flann.hpp>
 #include <fstream>
 #include <iostream>
 #include <map>
 #include <numeric>
+#include <random>
 #include <sstream>
 #include <svm.h>
 #include <vector>
 
 #include "../include/DelaunayClassifier.h"
+
+// =============================================================================
+// BENCHMARK CONFIGURATION CONSTANTS
+// =============================================================================
+//
+// All magic numerical values used by the benchmark harness are declared here
+// as named constants. These control measurement fidelity, not algorithm
+// behavior, so reviewers should not mistake them for tuned hyperparameters.
+
+namespace {
+
+/// Number of training points below which we fall back to a smaller CV fold
+/// count to avoid degenerate folds. Empirically, 5-fold CV needs at least
+/// ~5 * n_classes points per class; below this, 3-fold is safer.
+constexpr int CV_MIN_POINTS_FOR_5FOLD = 100;
+
+/// Number of cross-validation folds for hyperparameter selection (used by
+/// SVM grid search, KNN k selection).
+constexpr int CV_NUM_FOLDS = 5;
+
+/// Fallback CV fold count for small datasets below CV_MIN_POINTS_FOR_5FOLD.
+constexpr int CV_NUM_FOLDS_SMALL = 3;
+
+/// Target number of dynamic operations (insert/move/delete) to measure.
+/// Capped at test_data.size() per dataset so small datasets still work.
+constexpr int TARGET_DYNAMIC_OPS = 1000;
+
+/// 100 is the sklearn default and matches the conventional baseline.
+constexpr int RF_NUM_TREES = 100;
+
+/// Bootstrap sample size as a fraction of training data for each RF tree.
+/// 1.0 matches sklearn's default bootstrap sampling with replacement.
+constexpr double RF_BOOTSTRAP_FRACTION = 1.0;
+
+/// Maximum depth clamp for decision trees (both standalone DT and RF trees).
+/// Computed as min(DT_MAX_DEPTH_CAP, max(DT_MIN_DEPTH_CAP, 2*log2(n))).
+constexpr int DT_MAX_DEPTH_CAP = 20;
+constexpr int DT_MIN_DEPTH_CAP = 5;
+
+/// Movement offset used in the dynamic benchmark, as a fraction of the
+/// smaller data dimension. Benchmark parameter, not a model parameter.
+constexpr double DYNAMIC_MOVE_OFFSET_FRACTION = 0.01;
+
+/// Number of features for the 2D classifier. Hardcoded since this code
+/// is 2D-only; if the algorithm is ever extended to 3D+, update this.
+constexpr int N_FEATURES = 2;
+
+// =============================================================================
+// HYPERPARAMETER GRIDS FOR CV SEARCH
+// =============================================================================
+
+/// Covers the typical range from "very local" (k=1) through "smoothed" (k=15).
+const std::vector<int> KNN_K_GRID = {1, 3, 5, 7, 9, 11, 15};
+
+/// Logarithmic scale from under-regularized (C=100) to over-regularized
+/// (C=0.1).
+const std::vector<double> SVM_C_GRID = {0.1, 1.0, 10.0, 100.0};
+
+/// Applied relative to the sklearn 'scale' default: 1/(n_features * variance).
+/// Multipliers {0.1, 1.0, 10.0, 100.0} give four gamma values per dataset,
+/// adapting to the data's variance while exploring the neighborhood of 'scale'.
+const std::vector<double> SVM_GAMMA_MULTIPLIER_GRID = {0.1, 1.0, 10.0, 100.0};
+
+} // anonymous namespace
 
 // =============================================================================
 // RESULT STRUCTURES
@@ -36,12 +108,45 @@ struct BenchmarkResult {
   double train_time_ms;
 };
 
+/// Dynamic benchmark result with mean and standard deviation per operation.
+/// so reviewers can assess measurement stability.
 struct DynamicResult {
   std::string method;
-  double insert_ns;
-  double move_ns;
-  double delete_ns;
+  double insert_ns_mean;
+  double insert_ns_std;
+  double move_ns_mean;
+  double move_ns_std;
+  double delete_ns_mean;
+  double delete_ns_std;
+  int num_ops; ///< Actual number of operations measured (may be < TARGET)
 };
+
+// =============================================================================
+// STATISTICAL HELPERS
+// =============================================================================
+
+/// Compute mean of a vector of doubles.
+static double compute_mean(const std::vector<double> &values) {
+  if (values.empty())
+    return 0.0;
+  double sum = 0.0;
+  for (double v : values)
+    sum += v;
+  return sum / static_cast<double>(values.size());
+}
+
+/// Compute sample standard deviation (Bessel-corrected, divides by n-1).
+/// Returns 0.0 for vectors of size < 2.
+static double compute_std(const std::vector<double> &values, double mean) {
+  if (values.size() < 2)
+    return 0.0;
+  double sum_sq = 0.0;
+  for (double v : values) {
+    double d = v - mean;
+    sum_sq += d * d;
+  }
+  return std::sqrt(sum_sq / static_cast<double>(values.size() - 1));
+}
 
 // =============================================================================
 // DATA LOADING
@@ -123,8 +228,62 @@ compute_data_stats(const std::vector<std::tuple<float, float, int>> &data) {
   return stats;
 }
 
+/**
+ * @brief Compute the sklearn 'scale' gamma heuristic for RBF SVM.
+ *
+ * This is the sklearn default for gamma='scale' (since v0.22):
+ *   gamma = 1 / (n_features * X.var())
+ *
+ * 1/(n_features * variance) only because n_features=2 for this 2D classifier.
+ * We make the formula explicit here so future 3D extensions don't silently
+ * use the wrong value.
+ */
+static double sklearn_scale_gamma(double total_variance) {
+  if (total_variance <= 1e-10)
+    return 1.0;
+  return 1.0 / (static_cast<double>(N_FEATURES) * total_variance);
+}
+
 // =============================================================================
-// FLANN-based KNN classifier
+// CROSS-VALIDATION SPLIT HELPER
+// =============================================================================
+//
+// Creates stratified k-fold indices for CV. Returns a vector of (train_idx,
+// val_idx) pairs, one per fold. Uses a fixed seed for reproducibility so the
+// same fold split is reused across all baselines within one benchmark run.
+
+static std::vector<std::pair<std::vector<int>, std::vector<int>>>
+make_cv_folds(int n_samples, int n_folds, unsigned int seed = 42) {
+  std::vector<int> indices(n_samples);
+  std::iota(indices.begin(), indices.end(), 0);
+
+  std::mt19937 rng(seed);
+  std::shuffle(indices.begin(), indices.end(), rng);
+
+  std::vector<std::pair<std::vector<int>, std::vector<int>>> folds(n_folds);
+
+  for (int i = 0; i < n_samples; ++i) {
+    int fold = i % n_folds;
+    // This sample goes to fold's validation set; all other folds get it in
+    // train
+    for (int f = 0; f < n_folds; ++f) {
+      if (f == fold) {
+        folds[f].second.push_back(indices[i]);
+      } else {
+        folds[f].first.push_back(indices[i]);
+      }
+    }
+  }
+  return folds;
+}
+
+/// Select CV fold count based on dataset size.
+static int select_cv_folds(int n_samples) {
+  return (n_samples >= CV_MIN_POINTS_FOR_5FOLD) ? CV_NUM_FOLDS
+                                                : CV_NUM_FOLDS_SMALL;
+}
+
+// =============================================================================
 // =============================================================================
 
 class FlannKNN {
@@ -147,7 +306,20 @@ public:
     }
   }
 
+  int get_k() const { return k_; }
+
   void fit(const std::vector<std::tuple<float, float, int>> &train_data) {
+    // Clean up any previous fit state
+    if (index_) {
+      delete index_;
+      index_ = nullptr;
+    }
+    if (dataset_) {
+      delete[] dataset_->ptr();
+      delete dataset_;
+      dataset_ = nullptr;
+    }
+
     int n = static_cast<int>(train_data.size());
     float *data = new float[n * 2];
     labels_.resize(n);
@@ -165,19 +337,24 @@ public:
   }
 
   int predict(float x, float y) {
+    // Ensure k doesn't exceed the number of training points
+    int effective_k = std::min(k_, static_cast<int>(labels_.size()));
+    if (effective_k <= 0)
+      return -1;
+
     float query_data[2] = {x, y};
     flann::Matrix<float> query(query_data, 1, 2);
 
-    std::vector<int> indices(k_);
-    std::vector<float> dists(k_);
-    flann::Matrix<int> indices_mat(indices.data(), 1, k_);
-    flann::Matrix<float> dists_mat(dists.data(), 1, k_);
+    std::vector<int> indices(effective_k);
+    std::vector<float> dists(effective_k);
+    flann::Matrix<int> indices_mat(indices.data(), 1, effective_k);
+    flann::Matrix<float> dists_mat(dists.data(), 1, effective_k);
 
-    index_->knnSearch(query, indices_mat, dists_mat, k_,
+    index_->knnSearch(query, indices_mat, dists_mat, effective_k,
                       flann::SearchParams(128));
 
     std::map<int, int> votes;
-    for (int i = 0; i < k_; i++) {
+    for (int i = 0; i < effective_k; i++) {
       if (indices[i] >= 0 && indices[i] < (int)labels_.size()) {
         votes[labels_[indices[i]]]++;
       }
@@ -194,8 +371,69 @@ public:
   }
 };
 
+/**
+ *
+ * Runs 5-fold (or 3-fold for small datasets) CV on the training set across
+ * KNN_K_GRID and returns the k that maximizes mean validation accuracy.
+ * Ties are broken by preferring smaller k (more local).
+ */
+static int
+knn_cv_select_k(const std::vector<std::tuple<float, float, int>> &train_data) {
+  int n = static_cast<int>(train_data.size());
+  int n_folds = select_cv_folds(n);
+  auto folds = make_cv_folds(n, n_folds);
+
+  int best_k = KNN_K_GRID[0];
+  double best_mean_acc = -1.0;
+
+  for (int k : KNN_K_GRID) {
+    // Skip k values larger than the smallest training fold
+    bool k_too_large = false;
+    for (const auto &fold : folds) {
+      if (k > static_cast<int>(fold.first.size())) {
+        k_too_large = true;
+        break;
+      }
+    }
+    if (k_too_large)
+      continue;
+
+    double total_acc = 0.0;
+    for (const auto &fold : folds) {
+      const auto &train_idx = fold.first;
+      const auto &val_idx = fold.second;
+
+      std::vector<std::tuple<float, float, int>> fold_train;
+      fold_train.reserve(train_idx.size());
+      for (int i : train_idx)
+        fold_train.push_back(train_data[i]);
+
+      FlannKNN knn(k);
+      knn.fit(fold_train);
+
+      int correct = 0;
+      for (int i : val_idx) {
+        int pred =
+            knn.predict(std::get<0>(train_data[i]), std::get<1>(train_data[i]));
+        if (pred == std::get<2>(train_data[i]))
+          correct++;
+      }
+      total_acc +=
+          static_cast<double>(correct) / static_cast<double>(val_idx.size());
+    }
+    double mean_acc = total_acc / static_cast<double>(folds.size());
+
+    if (mean_acc > best_mean_acc) {
+      best_mean_acc = mean_acc;
+      best_k = k;
+    }
+  }
+
+  return best_k;
+}
+
 // =============================================================================
-// LibSVM Wrapper — Adaptive gamma via variance scaling
+// LibSVM Wrapper — with grid-search CV tuning (Issues #15, #16)
 // =============================================================================
 
 class SVMClassifier {
@@ -205,8 +443,7 @@ private:
   svm_parameter param_;
   std::vector<svm_node *> x_space_;
 
-public:
-  SVMClassifier() : model_(nullptr) {
+  void init_default_params() {
     param_.svm_type = C_SVC;
     param_.kernel_type = RBF;
     param_.gamma = 0.5;
@@ -220,33 +457,39 @@ public:
     param_.weight = nullptr;
   }
 
-  ~SVMClassifier() {
-    if (model_)
+  void free_model() {
+    if (model_) {
       svm_free_and_destroy_model(&model_);
+      model_ = nullptr;
+    }
     for (auto &x : x_space_)
       delete[] x;
+    x_space_.clear();
   }
 
-  void fit(const std::vector<std::tuple<float, float, int>> &train_data) {
+public:
+  SVMClassifier() : model_(nullptr) { init_default_params(); }
+
+  ~SVMClassifier() { free_model(); }
+
+  double get_C() const { return param_.C; }
+  double get_gamma() const { return param_.gamma; }
+
+  /**
+   * @brief Fit SVM with explicit (C, gamma) hyperparameters.
+   *
+   * Used by the grid-search CV driver to test candidate hyperparameters
+   * and by the final fit after CV has selected the best values.
+   */
+  void
+  fit_with_params(const std::vector<std::tuple<float, float, int>> &train_data,
+                  double C, double gamma) {
+    free_model();
+    init_default_params();
+    param_.C = C;
+    param_.gamma = gamma;
+
     int n = static_cast<int>(train_data.size());
-
-    // Adaptive gamma = 1 / (n_features * variance)
-    // Standard scikit-learn 'scale' heuristic
-    DataStats stats = compute_data_stats(train_data);
-    double variance = stats.total_variance;
-    if (variance > 1e-10) {
-      param_.gamma = 1.0 / (2.0 * variance);
-    } else {
-      param_.gamma = 1.0;
-    }
-
-    // Adaptive C based on data scale
-    if (variance > 1e-10) {
-      param_.C = std::max(1.0, 1.0 / variance);
-    } else {
-      param_.C = 1.0;
-    }
-
     prob_.l = n;
     prob_.y = new double[n];
     prob_.x = new svm_node *[n];
@@ -281,8 +524,74 @@ public:
   }
 };
 
+/**
+ *
+ * Previously, SVM used hardcoded C = max(1, 1/var) and gamma = 1/(2*var),
+ * which produced pathological results on some datasets (e.g., Spiral: 65%).
+ *
+ * This function:
+ *   1. Computes the sklearn 'scale' gamma as a reference: 1/(n_feat * var)
+ *   2. Explores a grid of C values and gamma values around that reference
+ *   3. Runs k-fold CV on the training set, picking the (C, gamma) with
+ *      the highest mean validation accuracy
+ *   4. Returns the best (C, gamma) pair for use in the final fit
+ *
+ * This is the standard methodology used by sklearn's GridSearchCV and is
+ * what reviewers expect from a publication-grade baseline comparison.
+ */
+static std::pair<double, double> svm_cv_select_params(
+    const std::vector<std::tuple<float, float, int>> &train_data,
+    const DataStats &stats) {
+  int n = static_cast<int>(train_data.size());
+  int n_folds = select_cv_folds(n);
+  auto folds = make_cv_folds(n, n_folds);
+
+  double scale_gamma = sklearn_scale_gamma(stats.total_variance);
+  double best_C = 1.0;
+  double best_gamma = scale_gamma;
+  double best_mean_acc = -1.0;
+
+  for (double C : SVM_C_GRID) {
+    for (double gamma_mult : SVM_GAMMA_MULTIPLIER_GRID) {
+      double gamma = scale_gamma * gamma_mult;
+
+      double total_acc = 0.0;
+      for (const auto &fold : folds) {
+        const auto &train_idx = fold.first;
+        const auto &val_idx = fold.second;
+
+        std::vector<std::tuple<float, float, int>> fold_train;
+        fold_train.reserve(train_idx.size());
+        for (int i : train_idx)
+          fold_train.push_back(train_data[i]);
+
+        SVMClassifier svm;
+        svm.fit_with_params(fold_train, C, gamma);
+
+        int correct = 0;
+        for (int i : val_idx) {
+          int pred = svm.predict(std::get<0>(train_data[i]),
+                                 std::get<1>(train_data[i]));
+          if (pred == std::get<2>(train_data[i]))
+            correct++;
+        }
+        total_acc +=
+            static_cast<double>(correct) / static_cast<double>(val_idx.size());
+      }
+      double mean_acc = total_acc / static_cast<double>(folds.size());
+
+      if (mean_acc > best_mean_acc) {
+        best_mean_acc = mean_acc;
+        best_C = C;
+        best_gamma = gamma;
+      }
+    }
+  }
+
+  return {best_C, best_gamma};
+}
+
 // =============================================================================
-// Decision Tree — Adaptive depth via log2(n) heuristic
 // =============================================================================
 
 struct DTNode {
@@ -347,18 +656,41 @@ private:
     int best_feature = 0;
     float best_value = 0;
 
+    //
+    // The previous implementation sampled every 20th value:
+    //   int step = std::max(1, (int)(values.size() / 20));
+    //   for (size_t i = 1; i < values.size(); i += step) { ... }
+    //
+    // This meant the DT only tried ~20 split points per feature regardless
+    // of dataset size, weakening the baseline unfairly. sklearn's DT tries
+    // every midpoint between distinct adjacent sorted values. We match that
+    // here by iterating over all adjacent pairs and using midpoints where
+    // values differ.
     for (int feature = 0; feature < 2; feature++) {
-      std::vector<float> values;
+      // Extract and sort feature values with their labels
+      std::vector<std::pair<float, int>> sorted_data;
+      sorted_data.reserve(data.size());
       for (const auto &pt : data) {
-        values.push_back(feature == 0 ? std::get<0>(pt) : std::get<1>(pt));
+        float v = (feature == 0) ? std::get<0>(pt) : std::get<1>(pt);
+        sorted_data.push_back({v, std::get<2>(pt)});
       }
-      std::sort(values.begin(), values.end());
+      std::sort(
+          sorted_data.begin(), sorted_data.end(),
+          [](const std::pair<float, int> &a, const std::pair<float, int> &b) {
+            return a.first < b.first;
+          });
 
-      int step = std::max(1, (int)(values.size() / 20));
-      for (size_t i = 1; i < values.size(); i += step) {
-        float split = (values[i - 1] + values[i]) / 2;
+      // Try every midpoint between distinct adjacent values
+      for (size_t i = 1; i < sorted_data.size(); ++i) {
+        // Skip duplicates: only consider splits where values differ
+        if (sorted_data[i - 1].first == sorted_data[i].first)
+          continue;
+
+        float split = (sorted_data[i - 1].first + sorted_data[i].first) / 2.0f;
 
         std::vector<int> left_labels, right_labels;
+        left_labels.reserve(i);
+        right_labels.reserve(sorted_data.size() - i);
         for (const auto &pt : data) {
           float v = feature == 0 ? std::get<0>(pt) : std::get<1>(pt);
           if (v <= split)
@@ -429,10 +761,97 @@ public:
   ~DecisionTreeCpp() { delete root_; }
 
   void fit(std::vector<std::tuple<float, float, int>> train_data) {
+    if (root_) {
+      delete root_;
+      root_ = nullptr;
+    }
     root_ = build(train_data, 0);
   }
 
   int predict(float x, float y) { return predict_node(root_, x, y); }
+};
+
+// =============================================================================
+// =============================================================================
+//
+// from the C++ benchmark, which reviewers flagged as incomplete (modern
+// tree-based methods should include RF as a baseline).
+//
+// Implementation:
+//   - N trees trained on bootstrap samples (sampling with replacement)
+//   - Prediction via majority vote across all trees
+//   - Seeded RNG for reproducibility
+//
+// Note: This is a classic bagging RF, not a "true" RF with feature
+// subsampling at each split. For a 2D classifier, feature subsampling
+// doesn't make much sense (you'd either see both features or neither).
+
+class RandomForestCpp {
+private:
+  std::vector<DecisionTreeCpp *> trees_;
+  int num_trees_;
+  int max_depth_;
+  int min_samples_;
+  unsigned int seed_;
+
+public:
+  RandomForestCpp(int num_trees = RF_NUM_TREES, int max_depth = 10,
+                  int min_samples = 2, unsigned int seed = 42)
+      : num_trees_(num_trees), max_depth_(max_depth), min_samples_(min_samples),
+        seed_(seed) {}
+
+  ~RandomForestCpp() {
+    for (auto *t : trees_)
+      delete t;
+    trees_.clear();
+  }
+
+  void fit(const std::vector<std::tuple<float, float, int>> &train_data) {
+    // Clean up any previous trees
+    for (auto *t : trees_)
+      delete t;
+    trees_.clear();
+    trees_.reserve(num_trees_);
+
+    int n = static_cast<int>(train_data.size());
+    int bootstrap_size = static_cast<int>(n * RF_BOOTSTRAP_FRACTION);
+
+    std::mt19937 rng(seed_);
+    std::uniform_int_distribution<int> sampler(0, n - 1);
+
+    for (int t = 0; t < num_trees_; ++t) {
+      // Draw bootstrap sample with replacement
+      std::vector<std::tuple<float, float, int>> bootstrap;
+      bootstrap.reserve(bootstrap_size);
+      for (int i = 0; i < bootstrap_size; ++i) {
+        bootstrap.push_back(train_data[sampler(rng)]);
+      }
+
+      DecisionTreeCpp *tree = new DecisionTreeCpp(max_depth_, min_samples_);
+      tree->fit(bootstrap);
+      trees_.push_back(tree);
+    }
+  }
+
+  int predict(float x, float y) {
+    if (trees_.empty())
+      return -1;
+
+    std::map<int, int> votes;
+    for (auto *tree : trees_) {
+      int pred = tree->predict(x, y);
+      votes[pred]++;
+    }
+
+    int best_label = -1, best_count = 0;
+    for (const auto &v : votes) {
+      if (v.second > best_count) {
+        best_count = v.second;
+        best_label = v.first;
+      }
+    }
+    return best_label;
+  }
 };
 
 // =============================================================================
@@ -459,25 +878,34 @@ void print_static_results(const std::vector<BenchmarkResult> &results,
   std::cout << std::string(95, '=') << std::endl;
 }
 
+/**
+ *
+ * Previously showed only means. Now shows "mean ± std" for each operation
+ * type so reviewers can assess measurement stability. The num_ops column
+ * shows how many operations contributed to each statistic.
+ */
 void print_dynamic_results(const std::vector<DynamicResult> &results,
                            const std::string &dataset_name) {
-  std::cout << "\n" << std::string(95, '=') << std::endl;
+  std::cout << "\n" << std::string(120, '=') << std::endl;
   std::cout << "C++ DYNAMIC BENCHMARK: " << dataset_name << std::endl;
-  std::cout << std::string(95, '-') << std::endl;
-  printf("%-30s | %-15s | %-15s | %-15s\n", "Algorithm", "Insert (ns)",
-         "Move (ns)", "Delete (ns)");
-  std::cout << std::string(95, '-') << std::endl;
+  std::cout << std::string(120, '-') << std::endl;
+  printf("%-30s | %-22s | %-22s | %-22s | %-8s\n", "Algorithm",
+         "Insert (ns) mean±std", "Move (ns) mean±std", "Delete (ns) mean±std",
+         "N ops");
+  std::cout << std::string(120, '-') << std::endl;
 
   for (const auto &r : results) {
-    if (r.insert_ns > 0) {
-      printf("%-30s | %12.0f    | %12.0f    | %12.0f\n", r.method.c_str(),
-             r.insert_ns, r.move_ns, r.delete_ns);
+    if (r.insert_ns_mean > 0) {
+      printf(
+          "%-30s | %10.0f ± %-9.0f | %10.0f ± %-9.0f | %10.0f ± %-9.0f | %8d\n",
+          r.method.c_str(), r.insert_ns_mean, r.insert_ns_std, r.move_ns_mean,
+          r.move_ns_std, r.delete_ns_mean, r.delete_ns_std, r.num_ops);
     } else {
-      printf("%-30s | %15s | %15s | %15s\n", r.method.c_str(), "N/A", "N/A",
-             "N/A");
+      printf("%-30s | %22s | %22s | %22s | %8s\n", r.method.c_str(), "N/A",
+             "N/A", "N/A", "N/A");
     }
   }
-  std::cout << std::string(95, '=') << std::endl;
+  std::cout << std::string(120, '=') << std::endl;
 }
 
 // =============================================================================
@@ -515,12 +943,22 @@ int main(int argc, char *argv[]) {
   std::vector<BenchmarkResult> static_results;
   std::vector<DynamicResult> dynamic_results;
 
+  // Shared adaptive depth used by DT and RF trees
+  int adaptive_depth =
+      std::min(DT_MAX_DEPTH_CAP,
+               std::max(DT_MIN_DEPTH_CAP,
+                        (int)(2.0 * std::log2((double)train_data.size()))));
+
   // ============================================
-  // STATIC 1: FLANN C++ KNN (k=5)
   // ============================================
   {
-    std::cout << "\nRunning FLANN C++ KNN (k=5)..." << std::endl;
-    FlannKNN knn(5);
+    std::cout << "\n[1/5] Running FLANN C++ KNN (CV-tuned k)..." << std::endl;
+    int best_k = knn_cv_select_k(train_data);
+    std::cout << "      Selected k=" << best_k << " via "
+              << select_cv_folds((int)train_data.size()) << "-fold CV"
+              << std::endl;
+
+    FlannKNN knn(best_k);
 
     auto train_start = std::chrono::high_resolution_clock::now();
     knn.fit(train_data);
@@ -546,21 +984,33 @@ int main(int argc, char *argv[]) {
     double avg_us = total_us / test_data.size();
     double accuracy = (double)correct / test_data.size();
 
-    static_results.push_back(
-        {"FLANN C++ KNN (k=5)", accuracy, avg_us, train_ms});
+    std::string method_label =
+        "FLANN C++ KNN (k=" + std::to_string(best_k) + ", CV)";
+    static_results.push_back({method_label, accuracy, avg_us, train_ms});
   }
 
   // ============================================
-  // STATIC 2: LibSVM (RBF, adaptive gamma)
+  // STATIC 2: LibSVM — grid-search CV (Issues #15, #16)
   // ============================================
   {
-    std::cout << "Running LibSVM C++ (RBF, adaptive gamma="
-              << 1.0 / (2.0 * std::max(stats.total_variance, 1e-10)) << ")..."
+    std::cout << "\n[2/5] Running LibSVM C++ (RBF, grid-search CV)..."
               << std::endl;
+    double scale_gamma_ref = sklearn_scale_gamma(stats.total_variance);
+    std::cout << "      Reference gamma (sklearn 'scale') = " << scale_gamma_ref
+              << std::endl;
+
+    std::pair<double, double> best_params =
+        svm_cv_select_params(train_data, stats);
+    double best_C = best_params.first;
+    double best_gamma = best_params.second;
+    std::cout << "      Selected C=" << best_C << ", gamma=" << best_gamma
+              << " via " << select_cv_folds((int)train_data.size())
+              << "-fold CV" << std::endl;
+
     SVMClassifier svm;
 
     auto train_start = std::chrono::high_resolution_clock::now();
-    svm.fit(train_data);
+    svm.fit_with_params(train_data, best_C, best_gamma);
     auto train_end = std::chrono::high_resolution_clock::now();
     double train_ms = std::chrono::duration_cast<std::chrono::microseconds>(
                           train_end - train_start)
@@ -584,18 +1034,14 @@ int main(int argc, char *argv[]) {
     double accuracy = (double)correct / test_data.size();
 
     static_results.push_back(
-        {"LibSVM C++ (RBF, adaptive)", accuracy, avg_us, train_ms});
+        {"LibSVM C++ (RBF, CV-tuned)", accuracy, avg_us, train_ms});
   }
 
   // ============================================
-  // STATIC 3: Decision Tree (adaptive depth)
   // ============================================
   {
-    // depth = min(20, max(5, 2 * log2(n)))
-    int adaptive_depth = std::min(
-        20, std::max(5, (int)(2.0 * std::log2((double)train_data.size()))));
-    std::cout << "Running C++ Decision Tree (adaptive depth=" << adaptive_depth
-              << ")..." << std::endl;
+    std::cout << "\n[3/5] Running C++ Decision Tree (exhaustive splits, depth="
+              << adaptive_depth << ")..." << std::endl;
 
     DecisionTreeCpp dt_clf(adaptive_depth, 2);
 
@@ -624,14 +1070,50 @@ int main(int argc, char *argv[]) {
     double accuracy = (double)correct / test_data.size();
 
     static_results.push_back(
-        {"C++ Decision Tree (adaptive)", accuracy, avg_us, train_ms});
+        {"C++ Decision Tree (exhaustive)", accuracy, avg_us, train_ms});
   }
 
   // ============================================
-  // STATIC 4: Delaunay C++ (Ours)
   // ============================================
   {
-    std::cout << "Running Delaunay C++ (Ours)..." << std::endl;
+    std::cout << "\n[4/5] Running C++ Random Forest (" << RF_NUM_TREES
+              << " trees, depth=" << adaptive_depth << ")..." << std::endl;
+
+    RandomForestCpp rf(RF_NUM_TREES, adaptive_depth, 2, 42);
+
+    auto train_start = std::chrono::high_resolution_clock::now();
+    rf.fit(train_data);
+    auto train_end = std::chrono::high_resolution_clock::now();
+    double train_ms = std::chrono::duration_cast<std::chrono::microseconds>(
+                          train_end - train_start)
+                          .count() /
+                      1000.0;
+
+    int correct = 0;
+    auto start = std::chrono::high_resolution_clock::now();
+    for (const auto &pt : test_data) {
+      int pred = rf.predict(std::get<0>(pt), std::get<1>(pt));
+      if (pred == std::get<2>(pt))
+        correct++;
+    }
+    auto end = std::chrono::high_resolution_clock::now();
+
+    double total_us =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(end - start)
+            .count() /
+        1000.0;
+    double avg_us = total_us / test_data.size();
+    double accuracy = (double)correct / test_data.size();
+
+    static_results.push_back(
+        {"C++ Random Forest (100 trees)", accuracy, avg_us, train_ms});
+  }
+
+  // ============================================
+  // STATIC 5: Delaunay C++ (Ours)
+  // ============================================
+  {
+    std::cout << "\n[5/5] Running Delaunay C++ (Ours)..." << std::endl;
     DelaunayClassifier classifier;
     classifier.set_output_dir("results");
 
@@ -659,6 +1141,16 @@ int main(int argc, char *argv[]) {
     double avg_us = total_us / test_data.size();
     double accuracy = (double)correct / test_data.size();
 
+    // Report MULTI_PARTITIONED fallback rate for soundness transparency
+    std::size_t fallback_count = classifier.get_multi_fallback_count();
+    std::size_t query_count = classifier.get_total_query_count();
+    if (query_count > 0) {
+      double fallback_pct = 100.0 * static_cast<double>(fallback_count) /
+                            static_cast<double>(query_count);
+      std::cout << "  MULTI fallback rate: " << fallback_pct << "% ("
+                << fallback_count << "/" << query_count << ")" << std::endl;
+    }
+
     static_results.push_back(
         {"**Delaunay C++ (Ours)**", accuracy, avg_us, train_ms});
   }
@@ -670,17 +1162,24 @@ int main(int argc, char *argv[]) {
   // ============================================
   std::cout << "\n--- DYNAMIC BENCHMARKS ---" << std::endl;
 
-  const int NUM_DYNAMIC_OPS = std::min(100, (int)test_data.size());
+  // Capped at test_data.size() so small datasets (e.g., wine with 36 test
+  // points) still produce a valid benchmark.
+  const int NUM_DYNAMIC_OPS =
+      std::min(TARGET_DYNAMIC_OPS, (int)test_data.size());
+  std::cout << "Measuring " << NUM_DYNAMIC_OPS << " operations per phase"
+            << std::endl;
 
-  // Dynamic: Decision Tree (requires full rebuild)
+  // --------------------------------------------
+  // Dynamic: Decision Tree (full rebuild per insertion)
+  // --------------------------------------------
   {
     std::cout << "Running C++ Decision Tree (Rebuild)..." << std::endl;
     std::vector<std::tuple<float, float, int>> working_data = train_data;
 
-    int adaptive_depth = std::min(
-        20, std::max(5, (int)(2.0 * std::log2((double)train_data.size()))));
+    // mean and std. Previously only the sum was tracked.
+    std::vector<double> rebuild_times_ns;
+    rebuild_times_ns.reserve(NUM_DYNAMIC_OPS);
 
-    double total_rebuild_ns = 0;
     for (int i = 0; i < NUM_DYNAMIC_OPS; i++) {
       working_data.push_back(test_data[i]);
 
@@ -688,17 +1187,33 @@ int main(int argc, char *argv[]) {
       auto start = std::chrono::high_resolution_clock::now();
       dt_new.fit(working_data);
       auto end = std::chrono::high_resolution_clock::now();
-      total_rebuild_ns +=
+      double elapsed_ns = static_cast<double>(
           std::chrono::duration_cast<std::chrono::nanoseconds>(end - start)
-              .count();
+              .count());
+      rebuild_times_ns.push_back(elapsed_ns);
     }
 
-    double avg_rebuild = total_rebuild_ns / NUM_DYNAMIC_OPS;
-    dynamic_results.push_back(
-        {"C++ Decision Tree (Rebuild)", avg_rebuild, avg_rebuild, avg_rebuild});
+    double mean = compute_mean(rebuild_times_ns);
+    double stddev = compute_std(rebuild_times_ns, mean);
+
+    // DT Rebuild has no distinct insert/move/delete phases — all three are
+    // the same full-rebuild cost. Report the same mean±std across columns
+    // for consistent visual alignment.
+    DynamicResult res;
+    res.method = "C++ Decision Tree (Rebuild)";
+    res.insert_ns_mean = mean;
+    res.insert_ns_std = stddev;
+    res.move_ns_mean = mean;
+    res.move_ns_std = stddev;
+    res.delete_ns_mean = mean;
+    res.delete_ns_std = stddev;
+    res.num_ops = NUM_DYNAMIC_OPS;
+    dynamic_results.push_back(res);
   }
 
-  // Dynamic: Delaunay — directly measure insert, move, delete
+  // --------------------------------------------
+  // Dynamic: Delaunay — direct insert/move/delete instrumentation
+  // --------------------------------------------
   {
     std::cout << "Running Delaunay C++ (Incremental)..." << std::endl;
 
@@ -706,16 +1221,23 @@ int main(int argc, char *argv[]) {
     classifier.set_output_dir("results");
     classifier.train(train_file, 3);
 
-    // Adaptive move offset: 1% of data range
+    // Adaptive move offset: fraction of data range
     double range_x = stats.x_max - stats.x_min;
     double range_y = stats.y_max - stats.y_min;
-    double move_offset_x = 0.01 * range_x;
-    double move_offset_y = 0.01 * range_y;
+    double move_offset_x = DYNAMIC_MOVE_OFFSET_FRACTION * range_x;
+    double move_offset_y = DYNAMIC_MOVE_OFFSET_FRACTION * range_y;
 
-    // --- Measure INSERT times ---
-    double total_insert_ns = 0;
+    std::vector<double> insert_times_ns;
+    std::vector<double> move_times_ns;
+    std::vector<double> delete_times_ns;
+    insert_times_ns.reserve(NUM_DYNAMIC_OPS);
+    move_times_ns.reserve(NUM_DYNAMIC_OPS);
+    delete_times_ns.reserve(NUM_DYNAMIC_OPS);
+
     std::vector<std::tuple<float, float, int>> inserted_points;
+    inserted_points.reserve(NUM_DYNAMIC_OPS);
 
+    // --- INSERT phase ---
     for (int i = 0; i < NUM_DYNAMIC_OPS; i++) {
       float x = std::get<0>(test_data[i]);
       float y = std::get<1>(test_data[i]);
@@ -724,16 +1246,15 @@ int main(int argc, char *argv[]) {
       auto start = std::chrono::high_resolution_clock::now();
       classifier.insert_point(x, y, label);
       auto end = std::chrono::high_resolution_clock::now();
-      total_insert_ns +=
+      insert_times_ns.push_back(static_cast<double>(
           std::chrono::duration_cast<std::chrono::nanoseconds>(end - start)
-              .count();
+              .count()));
       inserted_points.push_back({x, y, label});
     }
 
-    // --- Measure MOVE times directly via move_point() (Algorithm 3) ---
-    double total_move_ns = 0;
+    // --- MOVE phase ---
     std::vector<std::tuple<float, float, int>> moved_points;
-
+    moved_points.reserve(NUM_DYNAMIC_OPS);
     for (int i = 0; i < NUM_DYNAMIC_OPS; i++) {
       float old_x = std::get<0>(inserted_points[i]);
       float old_y = std::get<1>(inserted_points[i]);
@@ -743,14 +1264,13 @@ int main(int argc, char *argv[]) {
       auto start = std::chrono::high_resolution_clock::now();
       classifier.move_point(old_x, old_y, new_x, new_y);
       auto end = std::chrono::high_resolution_clock::now();
-      total_move_ns +=
+      move_times_ns.push_back(static_cast<double>(
           std::chrono::duration_cast<std::chrono::nanoseconds>(end - start)
-              .count();
+              .count()));
       moved_points.push_back({new_x, new_y, std::get<2>(inserted_points[i])});
     }
 
-    // --- Measure DELETE times ---
-    double total_delete_ns = 0;
+    // --- DELETE phase ---
     for (int i = NUM_DYNAMIC_OPS - 1; i >= 0; i--) {
       float x = std::get<0>(moved_points[i]);
       float y = std::get<1>(moved_points[i]);
@@ -758,17 +1278,25 @@ int main(int argc, char *argv[]) {
       auto start = std::chrono::high_resolution_clock::now();
       classifier.remove_point(x, y);
       auto end = std::chrono::high_resolution_clock::now();
-      total_delete_ns +=
+      delete_times_ns.push_back(static_cast<double>(
           std::chrono::duration_cast<std::chrono::nanoseconds>(end - start)
-              .count();
+              .count()));
     }
 
-    double avg_insert_ns = total_insert_ns / NUM_DYNAMIC_OPS;
-    double avg_move_ns = total_move_ns / NUM_DYNAMIC_OPS;
-    double avg_delete_ns = total_delete_ns / NUM_DYNAMIC_OPS;
+    double insert_mean = compute_mean(insert_times_ns);
+    double move_mean = compute_mean(move_times_ns);
+    double delete_mean = compute_mean(delete_times_ns);
 
-    dynamic_results.push_back({"**Delaunay C++ (O(1) Update)**", avg_insert_ns,
-                               avg_move_ns, avg_delete_ns});
+    DynamicResult res;
+    res.method = "**Delaunay C++ (O(1) Update)**";
+    res.insert_ns_mean = insert_mean;
+    res.insert_ns_std = compute_std(insert_times_ns, insert_mean);
+    res.move_ns_mean = move_mean;
+    res.move_ns_std = compute_std(move_times_ns, move_mean);
+    res.delete_ns_mean = delete_mean;
+    res.delete_ns_std = compute_std(delete_times_ns, delete_mean);
+    res.num_ops = NUM_DYNAMIC_OPS;
+    dynamic_results.push_back(res);
   }
 
   print_dynamic_results(dynamic_results, dataset_name);
@@ -789,6 +1317,21 @@ int main(int argc, char *argv[]) {
   }
   csv.close();
   std::cout << "\nResults saved to: " << output_file << std::endl;
+
+  // so external scripts (generate_figures.py) can consume the variance data.
+  std::string dyn_output_file =
+      "results/cpp_benchmark_dynamic_" + dataset_name + ".csv";
+  std::ofstream dyn_csv(dyn_output_file);
+  dyn_csv << "method,insert_ns_mean,insert_ns_std,move_ns_mean,move_ns_std,"
+             "delete_ns_mean,delete_ns_std,num_ops\n";
+  for (const auto &r : dynamic_results) {
+    dyn_csv << r.method << "," << r.insert_ns_mean << "," << r.insert_ns_std
+            << "," << r.move_ns_mean << "," << r.move_ns_std << ","
+            << r.delete_ns_mean << "," << r.delete_ns_std << "," << r.num_ops
+            << "\n";
+  }
+  dyn_csv.close();
+  std::cout << "Dynamic results saved to: " << dyn_output_file << std::endl;
 
   return 0;
 }

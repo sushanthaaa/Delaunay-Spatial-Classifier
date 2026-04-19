@@ -1,12 +1,13 @@
-variant,avg_insert_ns,avg_move_ns,avg_delete_ns,notes,dataset
-Full Dynamic (2D Buckets),162138.0,339331.0,172022.0,DT update + local bucket rebuild,moons
-Full Dynamic (2D Buckets),153052.0,306722.0,149893.0,DT update + local bucket rebuild,circles
-Full Dynamic (2D Buckets),157488.0,329555.0,159259.0,DT update + local bucket rebuild,spiral
-Full Dynamic (2D Buckets),159083.0,332432.0,162562.0,DT update + local bucket rebuild,gaussian_quantiles
-Full Dynamic (2D Buckets),229126.0,449266.0,217926.0,DT update + local bucket rebuild,cassini
-Full Dynamic (2D Buckets),154456.0,313353.0,152940.0,DT update + local bucket rebuild,checkerboard
-Full Dynamic (2D Buckets),226795.0,471440.0,223031.0,DT update + local bucket rebuild,blobs
-Full Dynamic (2D Buckets),652254.0,1281120.0,642024.0,DT update + local bucket rebuild,earthquake
-Full Dynamic (2D Buckets),37725.7,82408.6,35431.7,DT update + local bucket rebuild,wine
-Full Dynamic (2D Buckets),95120.8,201577.0,93073.8,DT update + local bucket rebuild,cancer
-Full Dynamic (2D Buckets),987209.0,2056270.0,960998.0,DT update + local bucket rebuild,bloodmnist
+dataset,variant,insert_ns_mean,insert_ns_cross_seed_std,move_ns_mean,move_ns_cross_seed_std,delete_ns_mean,delete_ns_cross_seed_std,insert_ns_within_std_mean,move_ns_within_std_mean,delete_ns_within_std_mean,n_seeds,num_ops,notes
+moons,Full Dynamic (2D Buckets),157279.6,1973.4592217727734,340927.6,5070.579237128634,159102.0,2176.75159354484,14151.0,21888.18,14323.820000000002,5,200,DT update + local bucket rebuild
+circles,Full Dynamic (2D Buckets),158616.0,1169.2012230578619,342148.8,3605.021594942255,160266.0,1684.4312096372473,15546.74,24802.799999999996,15472.2,5,200,DT update + local bucket rebuild
+spiral,Full Dynamic (2D Buckets),163255.6,1572.3380043743775,352528.6,6504.801249846147,166236.8,3241.6228497467127,16259.48,27774.04,16218.74,5,200,DT update + local bucket rebuild
+gaussian_quantiles,Full Dynamic (2D Buckets),161160.0,2479.054355999481,350781.6,5008.80602539168,164494.2,2539.4282230454946,14864.4,22512.3,13885.34,5,200,DT update + local bucket rebuild
+cassini,Full Dynamic (2D Buckets),234114.0,1562.2050121542948,509793.0,5288.172557698926,237669.8,2194.9053965945777,23482.28,39512.56,24538.019999999997,5,300,DT update + local bucket rebuild
+checkerboard,Full Dynamic (2D Buckets),154052.4,2009.2449576893305,331773.4,4541.1831387866305,156161.4,2954.180732453585,18587.54,34018.82000000001,18253.74,5,200,DT update + local bucket rebuild
+blobs,Full Dynamic (2D Buckets),234071.4,4286.422552665567,507352.6,8708.955494202504,235403.0,3319.5114851435596,22872.12,31626.8,20384.760000000002,5,300,DT update + local bucket rebuild
+earthquake,Full Dynamic (2D Buckets),692542.4,9733.713772245412,1571950.0,33671.513924978186,710654.6,14001.848103018401,100939.0,169844.6,92749.63999999998,5,1000,DT update + local bucket rebuild
+sfcrime,Full Dynamic (2D Buckets),511872.8,6032.326682135178,1134602.0,13300.893579004382,491619.8,5305.249965835729,56677.619999999995,64667.46,54820.81999999999,5,1000,DT update + local bucket rebuild
+wine,Full Dynamic (2D Buckets),36938.81999999999,258.7704136875003,73512.5,1081.597036793276,35914.54,803.1462712358182,4382.614,7619.2660000000005,4198.224,5,36,DT update + local bucket rebuild
+cancer,Full Dynamic (2D Buckets),95001.1,1251.7402685861032,203997.0,2647.6261065339268,96511.12000000002,1325.837141959749,12517.74,23899.88,12161.34,5,114,DT update + local bucket rebuild
+bloodmnist,Full Dynamic (2D Buckets),1093318.0,43411.562630248634,2403216.0,17717.41459694388,1066642.0,5677.131317840023,561606.2,292827.8,161438.0,5,1000,DT update + local bucket rebuild

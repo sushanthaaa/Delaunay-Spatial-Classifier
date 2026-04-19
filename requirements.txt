@@ -1,0 +1,47 @@
+# Delaunay Triangulation Classifier — Python Dependencies
+#
+# Tested with Python 3.12 on macOS 26 (Apple M3, April 2026).
+# Versions are pinned with ~= (compatible-release) to allow patch updates
+# but prevent breaking changes. If you need to update a major version,
+# re-run the full benchmark suite (ablation + CV + scalability + tests)
+# to confirm reproducibility before committing the change.
+#
+# Install with: pip install -r requirements.txt
+#
+
+# --- Core scientific stack (required by all scripts) ---
+numpy~=2.4.0           # Tested with 2.4.3
+scipy~=1.17.0          # Tested with 1.17.1; provides scipy.spatial.Delaunay/Voronoi
+pandas~=3.0.0          # Tested with 3.0.1; CSV I/O + DataFrame aggregation
+matplotlib~=3.10.0     # Tested with 3.10.8; figure generation
+
+# --- Machine learning baselines (benchmark_cv.py, ablation_study.py) ---
+scikit-learn~=1.8.0    # Tested with 1.8.0; KNN/SVM/DecisionTree/RandomForest baselines
+                       # plus model_selection (cross-validation, grid search)
+                       # plus metrics (confusion_matrix, classification_report)
+
+# --- Real-world dataset acquisition (generate_datasets.py) ---
+requests~=2.33.0       # Tested with 2.33.0; SF Open Data API + USGS earthquake feed
+medmnist>=3.0.0        # MedMNIST loader for bloodmnist (>= because 3.x has been
+                       # stable for a while; pinning more tightly creates churn)
+
+# --- Testing (tests/test_classifier.py) ---
+pytest>=8.0.0          # Optional; only needed if you prefer pytest over the
+                       # built-in unittest runner (which works without pytest).
+
+# --- Notes for reproducers ---
+#
+# 1. NumPy 2.x is required. NumPy 1.x is not supported because some downstream
+#    libraries (scipy 1.17+, pandas 3.x) depend on the new ABI.
+#
+# 2. Apple Silicon users: all dependencies have native arm64 wheels at the
+#    pinned versions. No special flags needed.
+#
+# 3. CGAL, FLANN, LibSVM, and LZ4 are C++ dependencies and are NOT in this
+#    file. Install them via your system package manager (brew/apt/vcpkg)
+#    before building the C++ binaries. See README.md for installation steps.
+#
+# 4. To regenerate this file with exact pinned versions for a frozen build,
+#    use: pip freeze > requirements-frozen.txt
+#    (Then commit both: requirements.txt for human-readable constraints,
+#     requirements-frozen.txt for byte-exact CI reproducibility.)

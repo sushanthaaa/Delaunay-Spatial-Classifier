@@ -1,3 +1,0 @@
-method,accuracy,avg_inference_us,speedup_vs_flann
-FLANN C++ KNN (k=5),0.544444,4.59282,1
-**Delaunay C++ (Ours)**,0.522222,0.117825,38.98

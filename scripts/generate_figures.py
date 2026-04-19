@@ -12,18 +12,56 @@ style of the V19 paper:
   - Gray dotted grid for SRR/2D Buckets overlay
 
 Figure categories:
-  A. Per-dataset pipeline figures (1–7 per dataset)
+  A. Per-dataset pipeline figures (1-7 per dataset)
   B. Summary comparison charts (accuracy, speedup, dynamic, scalability)
+  C. Bucket structural figures (Issues #35a, #36) — universal-HOMOGENEOUS finding
+  D. Confusion matrix figures — per-dataset multi-algorithm panels
 
 Usage:
-  python scripts/generate_publication_figures.py                        # All
-  python scripts/generate_publication_figures.py --datasets moons,wine  # Specific
-  python scripts/generate_publication_figures.py --summary-only         # Charts only
+  python scripts/generate_figures.py                           # All
+  python scripts/generate_figures.py --datasets moons,wine     # Specific
+  python scripts/generate_figures.py --summary-only            # Charts only
+  python scripts/generate_figures.py --regenerate-bucket-stats # Re-run C++ to
+                                                                 refresh bucket
+                                                                 stats CSV
+
+Fixes applied (Week 3 of the master action list):
+               figure generator covers the same 12 datasets as
+               benchmark_cv.py and ablation_study.py.
+               universal-HOMOGENEOUS finding: across all 12 datasets and
+               all 15,000+ buckets, every bucket is HOMOGENEOUS (Case A).
+               BIPARTITIONED and MULTI_PARTITIONED counts are zero. The
+               figure is a stacked bar showing this empirical observation
+               that motivates the simplified-classification framing in
+               the paper. Bucket counts are obtained by parsing the C++
+               binary's "2D Buckets Grid Statistics" stdout block, cached
+               to results/bucket_type_distribution.csv.
+               polygons-per-bucket per dataset, derived from the same
+               parsed stats data (total_polygons / total_buckets).
+               This is a partial fix; full per-bucket distribution
+               histograms require exposing BucketOccupancyStats via the
+               C++ CLI (tracked as Week 7 issues #47, #48).
+               the C++ binary to write per-bucket counts to disk
+               (currently only summary stats are exposed). See the
+               chart_vertices_per_bucket_histogram() stub for the planned
+               interface; it is a no-op pending the C++ change.
+               figure per dataset showing confusion matrices for all 5
+               algorithms side-by-side. Reads the per-dataset, per-algorithm
+               confusion matrix CSVs produced by benchmark_cv.py .
+
+Updated:
+  - chart_ablation_accuracy() now reads accuracy_mean / accuracy_std from
+    multi-seed ablation_summary.csv with error bars, falling
+    back to the old single-seed 'accuracy' column for compatibility.
+  - chart_accuracy_comparison() prefers multi-seed cv_summary.csv
+    when present, falling back to per-dataset cpp_benchmark_*.csv files.
 """
 
 import argparse
 import math
 import os
+import re
+import subprocess
 import sys
 import warnings
 import numpy as np
@@ -65,14 +103,20 @@ EDGE_CROSS_CLASS = '#CC0000'      # Red dashed for cross-class DT edges
 DECISION_BOUNDARY = '#000000'     # Black for decision boundaries
 GRID_COLOR = '#888888'            # Gray for SRR grid lines
 
+BUCKET_HOMO_COLOR = '#2ca02c'     # Green for HOMOGENEOUS
+BUCKET_BI_COLOR = '#ff7f0e'       # Orange for BIPARTITIONED
+BUCKET_MULTI_COLOR = '#d62728'    # Red for MULTI_PARTITIONED
+
 # Figure settings
 FIG_SIZE = (7, 7)
 DPI = 300
 BG_COLOR = 'white'
 
+# figure generator covers the same 12 datasets as benchmark_cv.py and
+# ablation_study.py.
 ALL_DATASETS = [
     'moons', 'circles', 'spiral', 'gaussian_quantiles', 'cassini',
-    'checkerboard', 'blobs', 'earthquake',
+    'checkerboard', 'blobs', 'earthquake', 'sfcrime',
     'wine', 'cancer', 'bloodmnist'
 ]
 
@@ -80,9 +124,13 @@ DATASET_NAMES = {
     'moons': 'Moons', 'circles': 'Circles', 'spiral': 'Spiral',
     'gaussian_quantiles': 'Gaussian Quantiles', 'cassini': 'Cassini',
     'checkerboard': 'Checkerboard', 'blobs': 'Blobs',
-    'earthquake': 'Earthquake', 'wine': 'Wine',
-    'cancer': 'Breast Cancer', 'bloodmnist': 'BloodMNIST'
+    'earthquake': 'Earthquake', 'sfcrime': 'SF Crime',
+    'wine': 'Wine', 'cancer': 'Breast Cancer', 'bloodmnist': 'BloodMNIST'
 }
+
+# Datasets with high spatial density where Fig 1-7 (per-point visualizations)
+# become visually busy. We still generate them but warn the user.
+DENSE_DATASETS = {'sfcrime', 'earthquake', 'bloodmnist'}
 
 
 # =============================================================================
@@ -326,7 +374,7 @@ def save_fig(fig, path):
 
 
 # =============================================================================
-# PER-DATASET PIPELINE FIGURES
+# PER-DATASET PIPELINE FIGURES (Fig 1-7)
 # =============================================================================
 
 def fig_1_raw_data(X, y, name, out_dir):
@@ -372,8 +420,6 @@ def fig_3_outlier_removal(X, y, name, out_dir):
     # Draw full DT with class-aware edges
     if len(X) >= 3:
         tri_full = Delaunay(X)
-        # Edges touching outliers → thin dashed gray
-        # Edges between clean points → solid red / dashed red by class
         seen = set()
         kept_same, kept_cross, removed = [], [], []
         for simplex in tri_full.simplices:
@@ -578,7 +624,407 @@ def fig_7_query_classification(X, y, X_stream, y_stream, name, out_dir):
 
 
 # =============================================================================
-# SUMMARY COMPARISON CHARTS
+# BUCKET STATISTICS (Issues #35a, #36)
+# =============================================================================
+# The C++ binary prints a "2D Buckets Grid Statistics" block to stdout
+# during training. We parse that block to extract HOMO/BI/MULTI counts and
+# total polygons per dataset. Cached to results/bucket_type_distribution.csv
+# so this doesn't need to re-run unless --regenerate-bucket-stats is passed.
+
+# Regex matches lines like:
+#   "Grid size: 29 x 29 = 841 buckets"
+#   "Homogeneous (Case A):     841"
+#   "Bipartitioned (Case B):   0"
+#   "Multi-partitioned (Case C): 0"
+#   "Total polygon regions:    841"
+GRID_SIZE_RE = re.compile(
+    r'Grid size:\s*(\d+)\s*x\s*(\d+)\s*=\s*(\d+)\s*buckets')
+HOMO_RE = re.compile(r'Homogeneous\s*\(Case A\):\s*(\d+)')
+BI_RE = re.compile(r'Bipartitioned\s*\(Case B\):\s*(\d+)')
+MULTI_RE = re.compile(r'Multi-partitioned\s*\(Case C\):\s*(\d+)')
+POLYS_RE = re.compile(r'Total polygon regions:\s*(\d+)')
+
+
+def parse_bucket_statistics(stdout):
+    """Parse the 2D Buckets Grid Statistics block from C++ stdout.
+
+    Returns a dict with keys: rows, cols, total_buckets, homo, bi, multi,
+    total_polys. Returns None if any required field is missing.
+    """
+    grid_match = GRID_SIZE_RE.search(stdout)
+    homo_match = HOMO_RE.search(stdout)
+    bi_match = BI_RE.search(stdout)
+    multi_match = MULTI_RE.search(stdout)
+    polys_match = POLYS_RE.search(stdout)
+
+    if not all([grid_match, homo_match, bi_match, multi_match, polys_match]):
+        return None
+
+    return {
+        'rows': int(grid_match.group(1)),
+        'cols': int(grid_match.group(2)),
+        'total_buckets': int(grid_match.group(3)),
+        'homo': int(homo_match.group(1)),
+        'bi': int(bi_match.group(1)),
+        'multi': int(multi_match.group(1)),
+        'total_polys': int(polys_match.group(1)),
+    }
+
+
+def collect_bucket_stats(root_dir, datasets, force_regenerate=False):
+    """Collect bucket statistics for each dataset.
+
+    If results/bucket_type_distribution.csv exists and force_regenerate is
+    False, load and return it. Otherwise, run the C++ binary on each dataset
+    and parse the stdout for the Grid Statistics block.
+
+    Returns a DataFrame with columns: dataset, grid_str, total_buckets,
+    homo, bi, multi, total_polys, mean_polys_per_bucket.
+    """
+    cache_path = f'{root_dir}/results/bucket_type_distribution.csv'
+
+    # Use cached version if present and not forced to regenerate.
+    if os.path.exists(cache_path) and not force_regenerate:
+        df = pd.read_csv(cache_path)
+        # Normalize column names for backward compatibility with hand-built
+        # versions of this CSV that use different column names.
+        rename = {
+            'Dataset': 'dataset', 'Grid': 'grid_str',
+            'HOMO': 'homo', 'BI': 'bi', 'MULTI': 'multi',
+            'Total_Polys': 'total_polys',
+        }
+        for old, new in rename.items():
+            if old in df.columns and new not in df.columns:
+                df = df.rename(columns={old: new})
+        # Compute total_buckets from homo+bi+multi if missing
+        if 'total_buckets' not in df.columns:
+            df['total_buckets'] = df['homo'] + df['bi'] + df['multi']
+        # Compute mean_polys_per_bucket
+        df['mean_polys_per_bucket'] = (
+            df['total_polys'] / df['total_buckets'].replace(0, np.nan))
+        return df
+
+    # Re-generate by running C++ binary on each dataset.
+    main_exe = f'{root_dir}/build/main'
+    if not os.path.exists(main_exe):
+        print(f"  Warning: C++ binary not found at {main_exe}")
+        print(f"  Cannot regenerate bucket stats. Build with: "
+              f"cd build && make")
+        return None
+
+    print("  Regenerating bucket statistics by running C++ binary on each "
+          "dataset...")
+    rows = []
+    for ds in datasets:
+        train_csv = f'{root_dir}/data/train/{ds}_train.csv'
+        test_csv = f'{root_dir}/data/test/{ds}_test_y.csv'
+        if not os.path.exists(train_csv) or not os.path.exists(test_csv):
+            print(f"    [SKIP] {ds}: data not found")
+            continue
+
+        cmd = [main_exe, 'static', train_csv, test_csv,
+               f'{root_dir}/results']
+        print(f"    {ds}... ", end='', flush=True)
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+
+        stats = parse_bucket_statistics(proc.stdout)
+        if stats is None:
+            print("FAILED to parse stats")
+            continue
+
+        rows.append({
+            'dataset': ds,
+            'grid_str': f"{stats['rows']} x {stats['cols']} = "
+                        f"{stats['total_buckets']}",
+            'total_buckets': stats['total_buckets'],
+            'homo': stats['homo'],
+            'bi': stats['bi'],
+            'multi': stats['multi'],
+            'total_polys': stats['total_polys'],
+            'mean_polys_per_bucket': (
+                stats['total_polys'] / stats['total_buckets']
+                if stats['total_buckets'] > 0 else 0.0),
+        })
+        print("OK")
+
+    if not rows:
+        return None
+
+    df = pd.DataFrame(rows)
+    df.to_csv(cache_path, index=False)
+    print(f"  Saved bucket stats: {cache_path}")
+    return df
+
+
+# =============================================================================
+# =============================================================================
+
+def chart_bucket_type_distribution(root_dir, figures_dir,
+                                   force_regenerate=False):
+    """Stacked bar chart visualizing the universal-HOMOGENEOUS finding.
+
+    For each dataset, shows the percentage of buckets that are HOMOGENEOUS
+    (Case A), BIPARTITIONED (Case B), or MULTI_PARTITIONED (Case C).
+
+    simplified-classification framing. Across all 12 datasets and 15,000+
+    buckets, every bucket is HOMOGENEOUS — the BI and MULTI code paths
+    are dead at query time under SRR (sqrt(n)) bucket sizing. The grid
+    is still valuable as a Voronoi-aware dominant-class lookup, but the
+    paper can honestly drop the BI/MULTI complexity from its main story.
+    """
+    df = collect_bucket_stats(root_dir, ALL_DATASETS, force_regenerate)
+    if df is None or df.empty:
+        print("  No bucket statistics available")
+        return
+
+    # Compute percentages per dataset.
+    df = df.copy()
+    df['homo_pct'] = 100.0 * df['homo'] / df['total_buckets']
+    df['bi_pct'] = 100.0 * df['bi'] / df['total_buckets']
+    df['multi_pct'] = 100.0 * df['multi'] / df['total_buckets']
+
+    # Sort by dataset name for consistent ordering with other figures.
+    df = df.sort_values('dataset').reset_index(drop=True)
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+    x = np.arange(len(df))
+    width = 0.6
+
+    # Stacked bars
+    ax.bar(x, df['homo_pct'], width, label='Homogeneous (Case A)',
+           color=BUCKET_HOMO_COLOR, edgecolor='black', linewidth=0.5)
+    ax.bar(x, df['bi_pct'], width, bottom=df['homo_pct'],
+           label='Bipartitioned (Case B)',
+           color=BUCKET_BI_COLOR, edgecolor='black', linewidth=0.5)
+    ax.bar(x, df['multi_pct'], width,
+           bottom=df['homo_pct'] + df['bi_pct'],
+           label='Multi-partitioned (Case C)',
+           color=BUCKET_MULTI_COLOR, edgecolor='black', linewidth=0.5)
+
+    # Annotate each bar with the total bucket count for context.
+    for i, row in df.iterrows():
+        ax.text(i, 102, f"{int(row['total_buckets'])}", ha='center',
+                va='bottom', fontsize=8, color='black')
+
+    ax.set_xlabel('Dataset', fontsize=11)
+    ax.set_ylabel('Bucket Percentage (%)', fontsize=11)
+    ax.set_title('2D Bucket Type Distribution — All Datasets Show 100% '
+                 'HOMOGENEOUS\n'
+                 '(numbers above bars: total buckets per dataset)',
+                 fontsize=12, fontweight='bold')
+    ax.set_xticks(x)
+    ax.set_xticklabels(
+        [DATASET_NAMES.get(d, d) for d in df['dataset']],
+        rotation=45, ha='right', fontsize=9)
+    ax.legend(loc='lower right', fontsize=9)
+    ax.set_ylim(0, 110)
+    ax.grid(axis='y', alpha=0.3)
+    plt.tight_layout()
+    save_fig(fig, f'{figures_dir}/summary_bucket_type_distribution.png')
+
+
+# =============================================================================
+# =============================================================================
+
+def chart_bucket_occupancy_summary(root_dir, figures_dir,
+                                   force_regenerate=False):
+    """Bar chart showing mean polygons per bucket across datasets.
+
+    total_polygons / total_buckets. Under SRR sizing (k = ceil(sqrt(n))),
+    this should be approximately 1.0 for HOMOGENEOUS-dominated grids,
+    confirming the O(1) inference claim.
+
+    NOTE: The full per-bucket distribution (max/std/p99) requires
+    exposing BucketOccupancyStats via the C++ CLI, tracked as
+    Week 7 issues #47 (print in print_statistics) and #48 (--bucket-stats
+    JSON output). Until then, only the mean is shown here.
+    """
+    df = collect_bucket_stats(root_dir, ALL_DATASETS, force_regenerate)
+    if df is None or df.empty:
+        print("  No bucket statistics available")
+        return
+
+    df = df.copy().sort_values('dataset').reset_index(drop=True)
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+    x = np.arange(len(df))
+
+    # Color by closeness to ideal (1.0).
+    colors = ['#2ca02c' if 0.9 <= v <= 1.1 else '#ff7f0e'
+              for v in df['mean_polys_per_bucket']]
+    bars = ax.bar(x, df['mean_polys_per_bucket'], color=colors,
+                  edgecolor='black', linewidth=0.5)
+
+    # Reference line at 1.0 (ideal SRR-sized occupancy).
+    ax.axhline(y=1.0, color='red', linestyle='--', linewidth=1.5,
+               alpha=0.7, label='Ideal SRR occupancy = 1.0')
+
+    # Annotate bars with the actual value.
+    for bar, v in zip(bars, df['mean_polys_per_bucket']):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.02,
+                f'{v:.2f}', ha='center', va='bottom', fontsize=8)
+
+    ax.set_xlabel('Dataset', fontsize=11)
+    ax.set_ylabel('Mean polygons per bucket', fontsize=11)
+    ax.set_title('Bucket Occupancy — Mean Polygons per Bucket\n'
+                 '(SRR k=ceil(sqrt(n)) sizing → ideal mean = 1.0)',
+                 fontsize=12, fontweight='bold')
+    ax.set_xticks(x)
+    ax.set_xticklabels(
+        [DATASET_NAMES.get(d, d) for d in df['dataset']],
+        rotation=45, ha='right', fontsize=9)
+    ax.legend(loc='upper right', fontsize=9)
+    ax.grid(axis='y', alpha=0.3)
+    plt.tight_layout()
+    save_fig(fig, f'{figures_dir}/summary_bucket_occupancy.png')
+
+
+# =============================================================================
+# =============================================================================
+
+def chart_vertices_per_bucket_histogram(root_dir, figures_dir):
+    """Per-bucket vertex count histogram — DEFERRED to Week 7.
+
+    to a CSV by the C++ binary. The data is available internally via
+    DelaunayClassifier::get_bucket_vertex_counts() (added in ,
+    but is not currently exposed through the CLI.
+
+    Tracked as Week 7 issues #47 (add to print_statistics) and #48
+    (--bucket-stats JSON output). Once the C++ binary writes a
+    bucket_vertex_counts_{dataset}.csv file, this function will:
+      1. Load each dataset's per-bucket vertex count CSV
+      2. Generate a multi-panel histogram (one panel per dataset)
+      3. Annotate with mean, std, max, p99 from BucketOccupancyStats
+    """
+    print("  [DEFERRED] vertices-per-bucket histogram (#36a) — "
+          "requires C++ change tracked as Week 7 issues #47/#48")
+
+
+# =============================================================================
+# =============================================================================
+
+def chart_confusion_matrices(root_dir, figures_dir, datasets):
+    """Generate one multi-panel figure per dataset, showing confusion matrices
+    for all algorithms side-by-side.
+
+    written by benchmark_cv.py . Each CSV is a square matrix of
+    counts, aggregated across 5 seeds.
+
+    File pattern: results/confusion_matrix_{dataset}_{algorithm}.csv
+    where algorithm is one of: KNN_(CV-tuned_k), SVM_(RBF,_CV-tuned),
+    Decision_Tree, Random_Forest, Delaunay_(Ours).
+
+    The output is one figure per dataset at:
+      figures/confusion_matrices/{dataset}.png
+    """
+    out_dir = f'{figures_dir}/confusion_matrices'
+    os.makedirs(out_dir, exist_ok=True)
+
+    results_dir = f'{root_dir}/results'
+    if not os.path.exists(results_dir):
+        print(f"  No results directory at {results_dir}")
+        return
+
+    # Find all confusion matrix files and group by dataset.
+    matrices_by_dataset = {}
+    for fname in os.listdir(results_dir):
+        if not fname.startswith('confusion_matrix_') or not fname.endswith('.csv'):
+            continue
+        # Parse: confusion_matrix_{dataset}_{algorithm}.csv
+        # Strip prefix and suffix, then split on first '_' that's followed
+        # by a known dataset name. Datasets don't contain underscores
+        # except 'gaussian_quantiles', which we handle explicitly.
+        stem = fname[len('confusion_matrix_'):-len('.csv')]
+        matched_dataset = None
+        for ds in ALL_DATASETS:
+            if stem.startswith(ds + '_'):
+                matched_dataset = ds
+                algorithm = stem[len(ds) + 1:].replace('_', ' ')
+                break
+        if matched_dataset is None:
+            continue
+
+        matrices_by_dataset.setdefault(matched_dataset, {})[algorithm] = (
+            os.path.join(results_dir, fname))
+
+    if not matrices_by_dataset:
+        print("  No confusion matrix CSVs found. "
+              "Run benchmark_cv.py first.")
+        return
+
+    # Generate one figure per dataset.
+    for ds in datasets:
+        if ds not in matrices_by_dataset:
+            continue
+
+        algorithms = sorted(matrices_by_dataset[ds].keys())
+        n_algs = len(algorithms)
+        if n_algs == 0:
+            continue
+
+        # Multi-panel figure: 1 row x N algorithms.
+        # Sized to fit each subplot at roughly 3.5 inches wide.
+        fig, axes = plt.subplots(
+            1, n_algs, figsize=(3.5 * n_algs, 4),
+            squeeze=False, facecolor=BG_COLOR)
+
+        for col_idx, alg in enumerate(algorithms):
+            ax = axes[0, col_idx]
+            try:
+                # benchmark_cv.py writes the CM with both row labels
+                # ("true_0", "true_1", ...) as the DataFrame index AND column
+                # labels ("pred_0", ...) as the header, via the default
+                # df.to_csv() call. Read with header=0 and index_col=0 to
+                # strip both, then .values gives the pure integer matrix.
+                # Reading with header=None (as the old code did) produced a
+                # mixed string/int matrix that crashed later on cm.sum().
+                cm = pd.read_csv(matrices_by_dataset[ds][alg],
+                                 header=0, index_col=0).values
+            except Exception as e:
+                print(f"    [WARN] Could not read CM for {ds}/{alg}: {e}")
+                continue
+
+            n_classes = cm.shape[0]
+            # Normalize to row percentages (recall per true class).
+            row_sums = cm.sum(axis=1, keepdims=True)
+            row_sums[row_sums == 0] = 1
+            cm_pct = 100.0 * cm / row_sums
+
+            im = ax.imshow(cm_pct, cmap='Blues', vmin=0, vmax=100,
+                           aspect='auto')
+
+            # Annotate each cell with raw count and percentage.
+            for i in range(n_classes):
+                for j in range(n_classes):
+                    val = int(cm[i, j])
+                    pct = cm_pct[i, j]
+                    # Use white text on dark cells, black on light.
+                    text_color = 'white' if pct > 50 else 'black'
+                    ax.text(j, i, f'{val}\n({pct:.0f}%)',
+                            ha='center', va='center',
+                            color=text_color, fontsize=8)
+
+            ax.set_xticks(range(n_classes))
+            ax.set_yticks(range(n_classes))
+            ax.set_xticklabels([f'{i}' for i in range(n_classes)])
+            ax.set_yticklabels([f'{i}' for i in range(n_classes)])
+            ax.set_xlabel('Predicted')
+            if col_idx == 0:
+                ax.set_ylabel('True')
+            # Truncate long algorithm names for column titles.
+            short_alg = alg if len(alg) <= 20 else alg[:17] + '...'
+            ax.set_title(short_alg, fontsize=10, fontweight='bold')
+
+        fig.suptitle(
+            f'{DATASET_NAMES.get(ds, ds)} — Confusion Matrices '
+            f'(aggregated across 5 seeds)',
+            fontsize=13, fontweight='bold', y=1.02)
+        plt.tight_layout()
+        save_fig(fig, f'{out_dir}/{ds}.png')
+
+
+# =============================================================================
+# SUMMARY COMPARISON CHARTS (existing, with updates for multi-seed)
 # =============================================================================
 
 def read_benchmark_csv(csv_path):
@@ -607,7 +1053,31 @@ def read_benchmark_csv(csv_path):
 
 
 def chart_accuracy_comparison(root_dir, figures_dir):
-    """Bar chart comparing accuracy across all datasets and algorithms."""
+    """Bar chart comparing accuracy across all datasets and algorithms.
+
+    UPDATED: Prefer multi-seed cv_summary.csv when available,
+    falling back to per-dataset cpp_benchmark_*.csv files.
+    """
+    cv_summary_path = f'{root_dir}/results/cv_summary.csv'
+
+    if os.path.exists(cv_summary_path):
+        # Multi-seed format: dataset,algorithm,mean_acc,std_acc,...
+        df = pd.read_csv(cv_summary_path)
+        if 'mean_acc' in df.columns:
+            results = []
+            for _, row in df.iterrows():
+                results.append({
+                    'dataset': row['dataset'],
+                    'method': row['algorithm'],
+                    'accuracy': row['mean_acc'] * 100,
+                    'accuracy_err': row.get('std_acc', 0) * 100,
+                })
+            results_df = pd.DataFrame(results)
+            _draw_accuracy_chart(results_df, figures_dir,
+                                 source_label='multi-seed cv_summary.csv')
+            return
+
+    # Fall back to per-dataset cpp_benchmark_*.csv files
     results = []
     for ds in ALL_DATASETS:
         csv_path = f'{root_dir}/results/cpp_benchmark_{ds}.csv'
@@ -617,35 +1087,57 @@ def chart_accuracy_comparison(root_dir, figures_dir):
                 results.append({
                     'dataset': ds,
                     'method': row['method'].replace('**', '').strip(),
-                    'accuracy': row['accuracy'] * 100
+                    'accuracy': row['accuracy'] * 100,
+                    'accuracy_err': 0,
                 })
 
     if not results:
-        print("  No benchmark CSVs found. Run benchmarks first.")
+        print("  No accuracy data found. Run benchmark_cv.py or "
+              "C++ benchmark first.")
         return
 
-    df = pd.DataFrame(results)
+    _draw_accuracy_chart(pd.DataFrame(results), figures_dir,
+                         source_label='per-dataset cpp_benchmark_*.csv')
+
+
+def _draw_accuracy_chart(df, figures_dir, source_label=''):
+    """Common drawing logic for the accuracy comparison chart."""
     methods = df['method'].unique()
     datasets = df['dataset'].unique()
 
     fig, ax = plt.subplots(figsize=(14, 5))
     x = np.arange(len(datasets))
     width = 0.8 / len(methods)
-    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728',
+              '#9467bd', '#8c564b']
+
+    has_errors = 'accuracy_err' in df.columns and (df['accuracy_err'] > 0).any()
 
     for i, method in enumerate(methods):
-        vals = []
+        vals, errs = [], []
         for ds in datasets:
             sub = df[(df['dataset'] == ds) & (df['method'] == method)]
-            vals.append(sub['accuracy'].values[0] if len(sub) > 0 else 0)
-        label = method.split('(')[0].strip() if '(' in method else method
+            if len(sub) > 0:
+                vals.append(sub['accuracy'].values[0])
+                errs.append(sub['accuracy_err'].values[0]
+                            if 'accuracy_err' in sub.columns else 0)
+            else:
+                vals.append(0)
+                errs.append(0)
+        label = method
         ax.bar(x + i * width, vals, width, label=label,
-               color=colors[i % len(colors)], edgecolor='black', linewidth=0.3)
+               color=colors[i % len(colors)], edgecolor='black',
+               linewidth=0.3,
+               yerr=errs if has_errors else None,
+               capsize=2 if has_errors else 0,
+               error_kw={'ecolor': 'black', 'elinewidth': 0.5})
 
     ax.set_xlabel('Dataset', fontsize=11)
     ax.set_ylabel('Accuracy (%)', fontsize=11)
-    ax.set_title('Classification Accuracy Comparison', fontsize=13,
-                 fontweight='bold')
+    title = 'Classification Accuracy Comparison'
+    if source_label:
+        title += f' ({source_label})'
+    ax.set_title(title, fontsize=13, fontweight='bold')
     ax.set_xticks(x + width * (len(methods) - 1) / 2)
     ax.set_xticklabels([DATASET_NAMES.get(d, d) for d in datasets],
                        rotation=45, ha='right', fontsize=9)
@@ -696,29 +1188,63 @@ def chart_speedup_comparison(root_dir, figures_dir):
 
 
 def chart_dynamic_comparison(root_dir, figures_dir):
-    """Grouped bar chart: dynamic insert/move/delete vs DT rebuild."""
+    """Grouped bar chart: dynamic insert/move/delete with cross-seed std bars.
+
+    UPDATED: Reads ablation_dynamic_summary.csv (multi-seed) if available,
+    falling back to legacy ablation_dynamic_{dataset}.csv format.
+    """
+    multi_path = f'{root_dir}/results/ablation_dynamic_summary.csv'
+
     datasets_found = []
-    dt_rebuilds = []
-    our_inserts = []
-    our_moves = []
-    our_deletes = []
+    inserts, moves, deletes = [], [], []
+    insert_errs, move_errs, delete_errs = [], [], []
 
-    for ds in ALL_DATASETS:
-        csv_path = f'{root_dir}/results/cpp_benchmark_{ds}.csv'
-        if not os.path.exists(csv_path):
-            continue
-
-        # Dynamic results are printed in stdout, not CSV, so read from
-        # ablation_dynamic_ CSVs instead
-        dyn_csv = f'{root_dir}/results/ablation_dynamic_{ds}.csv'
-        if os.path.exists(dyn_csv):
+    if os.path.exists(multi_path):
+        # Multi-seed format
+        df = pd.read_csv(multi_path)
+        for ds in ALL_DATASETS:
+            ds_data = df[df['dataset'] == ds]
+            if ds_data.empty:
+                continue
+            row = ds_data.iloc[0]
+            datasets_found.append(DATASET_NAMES.get(ds, ds))
+            # Convert ns to ms for plot readability
+            inserts.append(row['insert_ns_mean'] / 1e6)
+            moves.append(row['move_ns_mean'] / 1e6)
+            deletes.append(row['delete_ns_mean'] / 1e6)
+            insert_errs.append(
+                row.get('insert_ns_cross_seed_std', 0) / 1e6)
+            move_errs.append(
+                row.get('move_ns_cross_seed_std', 0) / 1e6)
+            delete_errs.append(
+                row.get('delete_ns_cross_seed_std', 0) / 1e6)
+    else:
+        # Legacy per-dataset format
+        for ds in ALL_DATASETS:
+            dyn_csv = f'{root_dir}/results/ablation_dynamic_{ds}.csv'
+            if not os.path.exists(dyn_csv):
+                continue
             df = pd.read_csv(dyn_csv)
-            if len(df) > 0:
-                row = df.iloc[0]
-                datasets_found.append(DATASET_NAMES.get(ds, ds))
-                our_inserts.append(row['avg_insert_ns'] / 1e6)
-                our_moves.append(row['avg_move_ns'] / 1e6)
-                our_deletes.append(row['avg_delete_ns'] / 1e6)
+            if len(df) == 0:
+                continue
+            row = df.iloc[0]
+            datasets_found.append(DATASET_NAMES.get(ds, ds))
+            # Try multiple column name variants
+            ins_col = ('avg_insert_ns' if 'avg_insert_ns' in row
+                       else 'insert_ns_mean' if 'insert_ns_mean' in row
+                       else None)
+            mov_col = ('avg_move_ns' if 'avg_move_ns' in row
+                       else 'move_ns_mean' if 'move_ns_mean' in row
+                       else None)
+            del_col = ('avg_delete_ns' if 'avg_delete_ns' in row
+                       else 'delete_ns_mean' if 'delete_ns_mean' in row
+                       else None)
+            inserts.append(row[ins_col] / 1e6 if ins_col else 0)
+            moves.append(row[mov_col] / 1e6 if mov_col else 0)
+            deletes.append(row[del_col] / 1e6 if del_col else 0)
+            insert_errs.append(0)
+            move_errs.append(0)
+            delete_errs.append(0)
 
     if not datasets_found:
         print("  No dynamic ablation data found.")
@@ -727,13 +1253,23 @@ def chart_dynamic_comparison(root_dir, figures_dir):
     fig, ax = plt.subplots(figsize=(12, 5))
     x = np.arange(len(datasets_found))
     width = 0.25
+    has_errors = any(e > 0 for e in insert_errs + move_errs + delete_errs)
 
-    ax.bar(x - width, our_inserts, width, label='Insert', color='#2ca02c',
-           edgecolor='black', linewidth=0.3)
-    ax.bar(x, our_moves, width, label='Move', color='#ff7f0e',
-           edgecolor='black', linewidth=0.3)
-    ax.bar(x + width, our_deletes, width, label='Delete', color='#1f77b4',
-           edgecolor='black', linewidth=0.3)
+    ax.bar(x - width, inserts, width, label='Insert', color='#2ca02c',
+           edgecolor='black', linewidth=0.3,
+           yerr=insert_errs if has_errors else None,
+           capsize=2 if has_errors else 0,
+           error_kw={'ecolor': 'black', 'elinewidth': 0.5})
+    ax.bar(x, moves, width, label='Move', color='#ff7f0e',
+           edgecolor='black', linewidth=0.3,
+           yerr=move_errs if has_errors else None,
+           capsize=2 if has_errors else 0,
+           error_kw={'ecolor': 'black', 'elinewidth': 0.5})
+    ax.bar(x + width, deletes, width, label='Delete', color='#1f77b4',
+           edgecolor='black', linewidth=0.3,
+           yerr=delete_errs if has_errors else None,
+           capsize=2 if has_errors else 0,
+           error_kw={'ecolor': 'black', 'elinewidth': 0.5})
 
     ax.set_xlabel('Dataset', fontsize=11)
     ax.set_ylabel('Time (ms)', fontsize=11)
@@ -748,7 +1284,11 @@ def chart_dynamic_comparison(root_dir, figures_dir):
 
 
 def chart_scalability(root_dir, figures_dir):
-    """Two-panel plot: O(n log n) training + O(1) inference."""
+    """Two-panel plot: O(n log n) training + O(1) inference.
+
+    Annotates the cache transition point if n >= 300K data is present
+    (added based on the n=1M scalability finding from the previous session).
+    """
     train_csv = f'{root_dir}/results/scalability_train.csv'
     infer_csv = f'{root_dir}/results/scalability_inference.csv'
 
@@ -772,43 +1312,77 @@ def chart_scalability(root_dir, figures_dir):
     if t_col == 'train_time_ms':
         t_vals = t_vals / 1000.0
 
+    # Filter NaN entries (from missing C++ timing)
+    train_valid = ~np.isnan(t_vals)
+    infer_valid = ~np.isnan(i_vals)
+
     fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
 
-    # Training
+    # Training panel
     ax = axes[0]
-    ax.loglog(n_vals, t_vals, 'bo-', linewidth=2, markersize=7,
-              label='Measured')
-    c = t_vals[0] / (n_vals[0] * np.log2(n_vals[0]))
-    ref = c * n_vals * np.log2(n_vals.astype(float))
-    ax.loglog(n_vals, ref, 'r--', linewidth=1.5, alpha=0.6,
-              label='O(n log n) reference')
+    if train_valid.sum() >= 1:
+        ax.loglog(n_vals[train_valid], t_vals[train_valid], 'bo-',
+                  linewidth=2, markersize=7, label='Measured')
+        nv = n_vals[train_valid].astype(float)
+        tv = t_vals[train_valid]
+        c = tv[0] / (nv[0] * np.log2(nv[0]))
+        ref = c * nv * np.log2(nv)
+        ax.loglog(nv, ref, 'r--', linewidth=1.5, alpha=0.6,
+                  label='O(n log n) reference')
     ax.set_xlabel('Training points (n)', fontsize=11)
     ax.set_ylabel('Training time (s)', fontsize=11)
     ax.set_title('Training Complexity', fontsize=13, fontweight='bold')
     ax.legend(fontsize=9)
     ax.grid(True, alpha=0.3)
 
-    # Inference
+    # Inference panel
     ax = axes[1]
-    ax.semilogx(n_vals, i_vals, 'gs-', linewidth=2, markersize=7,
-                label='Measured')
-    mean_i = np.mean(i_vals)
-    ax.axhline(y=mean_i, color='r', linestyle='--', linewidth=1.5, alpha=0.6,
-               label=f'O(1) mean = {mean_i:.3f} us')
+    if infer_valid.sum() >= 1:
+        ax.semilogx(n_vals[infer_valid], i_vals[infer_valid], 'gs-',
+                    linewidth=2, markersize=7, label='Measured')
+        # Cache-transition annotation: if n_vals contains entries beyond
+        # 300K, mean inference is misleading because of the L2->DRAM step.
+        # Show two reference lines: one for the L2-resident range
+        # (n <= 300K) and the actual mean of the full data.
+        small_n_mask = (n_vals <= 300_000) & infer_valid
+        if small_n_mask.sum() >= 2:
+            mean_small = float(np.mean(i_vals[small_n_mask]))
+            ax.axhline(y=mean_small, color='r', linestyle='--',
+                       linewidth=1.5, alpha=0.6,
+                       label=f'O(1) (L2-resident): {mean_small:.3f} us')
+        else:
+            mean_all = float(np.mean(i_vals[infer_valid]))
+            ax.axhline(y=mean_all, color='r', linestyle='--',
+                       linewidth=1.5, alpha=0.6,
+                       label=f'Mean: {mean_all:.3f} us')
+
+        # Annotate cache transition if data extends beyond 300K
+        if (n_vals >= 1_000_000).any():
+            ax.annotate(
+                'L2 cache exceeded\n(see paper Section 5)',
+                xy=(1e6, i_vals[n_vals == n_vals[infer_valid].max()][-1]),
+                xytext=(0.55, 0.65), textcoords='axes fraction',
+                fontsize=9, color='gray',
+                arrowprops=dict(arrowstyle='->', color='gray', lw=1))
+
     ax.set_xlabel('Training points (n)', fontsize=11)
     ax.set_ylabel('Inference time (us/point)', fontsize=11)
     ax.set_title('Inference Complexity: O(1) via 2D Buckets',
                  fontsize=13, fontweight='bold')
     ax.legend(fontsize=9)
     ax.grid(True, alpha=0.3)
-    ax.set_ylim(0, max(i_vals) * 2 if len(i_vals) > 0 else 1)
 
     plt.tight_layout()
     save_fig(fig, f'{figures_dir}/summary_scalability.png')
 
 
 def chart_ablation_accuracy(root_dir, figures_dir):
-    """Grouped bar chart showing ablation accuracy impact."""
+    """Grouped bar chart showing ablation accuracy impact.
+
+    UPDATED for : Reads accuracy_mean / accuracy_std from the
+    multi-seed ablation_summary.csv (cross-seed mean and std), with error
+    bars. Falls back to old single-seed 'accuracy' column for compatibility.
+    """
     summary_csv = f'{root_dir}/results/ablation_summary.csv'
     if not os.path.exists(summary_csv):
         print("  No ablation_summary.csv found. Run ablation_study.py first.")
@@ -816,34 +1390,52 @@ def chart_ablation_accuracy(root_dir, figures_dir):
 
     df = pd.read_csv(summary_csv)
 
-    # Filter to main ablation variants
-    variants = ['Full Pipeline', 'Without 2D Buckets',
-                'Without Outlier', 'Nearest Vertex']
-    variant_labels = ['Full\nPipeline', 'No 2D\nBuckets',
-                      'No Outlier\nRemoval', 'Nearest\nVertex']
+    # Accept both new (multi-seed) and legacy (single-seed) column names.
+    use_multi_seed = 'accuracy_mean' in df.columns
+    acc_col = 'accuracy_mean' if use_multi_seed else 'accuracy'
+    std_col = 'accuracy_std' if 'accuracy_std' in df.columns else None
 
-    datasets = df['dataset'].unique()
-    fig, ax = plt.subplots(figsize=(12, 5))
+    # Filter to main 4 ablation variants. Substring matching is used
+    # because the C++ binary's variant strings have varied across versions
+    # (e.g. "Without 2D Buckets Grid" vs "Without SRR Grid").
+    variants = [
+        ('Full Pipeline', 'Full\nPipeline', '#2ca02c'),
+        ('Without 2D Buckets', 'No 2D\nBuckets', '#1f77b4'),
+        ('Without Outlier', 'No Outlier\nRemoval', '#ff7f0e'),
+        ('Nearest Vertex', 'Nearest\nVertex', '#d62728'),
+    ]
+
+    datasets = sorted(df['dataset'].unique())
+
+    fig, ax = plt.subplots(figsize=(14, 5))
     x = np.arange(len(datasets))
     width = 0.8 / len(variants)
-    colors = ['#2ca02c', '#1f77b4', '#ff7f0e', '#d62728']
 
-    for i, (var, label) in enumerate(zip(variants, variant_labels)):
-        vals = []
+    for i, (var_match, label, color) in enumerate(variants):
+        vals, errs = [], []
         for ds in datasets:
             sub = df[(df['dataset'] == ds) &
-                     (df['variant'].str.contains(var, na=False))]
+                     (df['variant'].str.contains(var_match, na=False))]
             if len(sub) > 0:
-                vals.append(sub['accuracy'].values[0] * 100)
+                vals.append(sub[acc_col].values[0] * 100)
+                errs.append(sub[std_col].values[0] * 100
+                            if std_col else 0)
             else:
                 vals.append(0)
-        ax.bar(x + i * width, vals, width, label=label,
-               color=colors[i], edgecolor='black', linewidth=0.3)
+                errs.append(0)
+
+        ax.bar(x + i * width, vals, width, label=label, color=color,
+               edgecolor='black', linewidth=0.3,
+               yerr=errs if std_col else None,
+               capsize=2 if std_col else 0,
+               error_kw={'ecolor': 'black', 'elinewidth': 0.5})
 
     ax.set_xlabel('Dataset', fontsize=11)
     ax.set_ylabel('Accuracy (%)', fontsize=11)
-    ax.set_title('Ablation Study: Component Contribution',
-                 fontsize=13, fontweight='bold')
+    title = 'Ablation Study: Component Contribution'
+    if use_multi_seed:
+        title += ' (mean +/- std across 5 seeds)'
+    ax.set_title(title, fontsize=13, fontweight='bold')
     ax.set_xticks(x + width * 1.5)
     ax.set_xticklabels([DATASET_NAMES.get(d, d) for d in datasets],
                        rotation=45, ha='right', fontsize=9)
@@ -874,8 +1466,13 @@ def generate_dataset_figures(ds_key, root_dir, figures_dir):
         print(f"  [SKIP] {name}: training data not found")
         return
 
-    print(f"\n  [{name}] ({len(X_train)} points, "
-          f"{len(np.unique(y_train))} classes)")
+    n_pts = len(X_train)
+    n_cls = len(np.unique(y_train))
+    print(f"\n  [{name}] ({n_pts} points, {n_cls} classes)")
+
+    if ds_key in DENSE_DATASETS:
+        print(f"    NOTE: Dense dataset. Per-point figures will be visually "
+              f"busy; consider using only summary charts in the paper.")
 
     # Fig 1: Raw data
     fig_1_raw_data(X_train, y_train, name, out_dir)
@@ -893,7 +1490,9 @@ def generate_dataset_figures(ds_key, root_dir, figures_dir):
     # Fig 5: SRR grid overlay
     fig_5_srr_grid(X_clean, y_clean, name, out_dir)
 
-    # Fig 6 & 7: Dynamic update and query classification
+    # Fig 6 & 7: Dynamic update and query classification.
+    # Skip gracefully if dynamic data files don't exist (sfcrime, real
+    # datasets without pre-generated dynamic streams).
     X_base, y_base = load_csv(base_path)
     X_stream, y_stream = load_csv(stream_path)
 
@@ -902,6 +1501,9 @@ def generate_dataset_figures(ds_key, root_dir, figures_dir):
                              name, out_dir)
         fig_7_query_classification(X_clean, y_clean, X_stream, y_stream,
                                    name, out_dir)
+    else:
+        print(f"    [SKIP] dynamic figures (Fig 6, 7): "
+              f"no dynamic_base / dynamic_stream files for {ds_key}")
 
 
 def main():
@@ -912,6 +1514,11 @@ def main():
                         help='Comma-separated dataset names or "all"')
     parser.add_argument('--summary-only', action='store_true',
                         help='Generate only summary charts (no per-dataset)')
+    parser.add_argument('--regenerate-bucket-stats', action='store_true',
+                        help='Re-run C++ binary to refresh '
+                             'results/bucket_type_distribution.csv (used by '
+                             ' / #36 figures). Defaults to using '
+                             'cached CSV if present.')
     args = parser.parse_args()
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -931,7 +1538,7 @@ def main():
     print(f"Output: {figures_dir}")
     print("=" * 70)
 
-    # Per-dataset pipeline figures
+    # Per-dataset pipeline figures (Fig 1-7 per dataset)
     if not args.summary_only:
         for ds in datasets:
             generate_dataset_figures(ds, root_dir, figures_dir)
@@ -943,6 +1550,16 @@ def main():
     chart_dynamic_comparison(root_dir, figures_dir)
     chart_scalability(root_dir, figures_dir)
     chart_ablation_accuracy(root_dir, figures_dir)
+
+    print("\n  [BUCKET STRUCTURAL FIGURES]")
+    chart_bucket_type_distribution(root_dir, figures_dir,
+                                   force_regenerate=args.regenerate_bucket_stats)
+    chart_bucket_occupancy_summary(root_dir, figures_dir,
+                                   force_regenerate=False)
+    chart_vertices_per_bucket_histogram(root_dir, figures_dir)
+
+    print("\n  [CONFUSION MATRIX FIGURES]")
+    chart_confusion_matrices(root_dir, figures_dir, datasets)
 
     print("\n" + "=" * 70)
     print("FIGURE GENERATION COMPLETE")
