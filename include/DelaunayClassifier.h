@@ -475,12 +475,6 @@ public:
   // ---------------------------------------------------------------------------
   // Instrumentation for O(1) claim validation and soundness reporting
   // ---------------------------------------------------------------------------
-  //
-  // These accessors expose internal state for empirical validation of the
-  // algorithm's complexity and correctness claims. They are safe to call at
-  // any time after train() has completed, and are designed to be consumed by
-  // external tools (generate_figures.py, benchmark.cpp) to produce the
-  // evidence reviewers will demand for journal submission.
 
   /**
    * @brief Return the distribution of polygon counts per bucket.

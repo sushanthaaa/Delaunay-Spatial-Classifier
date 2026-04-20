@@ -1,10 +1,8 @@
 # Delaunay Triangulation Classifier — Python Dependencies
 #
-# Tested with Python 3.12 on macOS 26 (Apple M3, April 2026).
+# Tested with Python 3.12 on macOS 26 (Apple M3).
 # Versions are pinned with ~= (compatible-release) to allow patch updates
-# but prevent breaking changes. If you need to update a major version,
-# re-run the full benchmark suite (ablation + CV + scalability + tests)
-# to confirm reproducibility before committing the change.
+# but prevent breaking changes.
 #
 # Install with: pip install -r requirements.txt
 #
@@ -40,8 +38,3 @@ pytest>=8.0.0          # Optional; only needed if you prefer pytest over the
 # 3. CGAL, FLANN, LibSVM, and LZ4 are C++ dependencies and are NOT in this
 #    file. Install them via your system package manager (brew/apt/vcpkg)
 #    before building the C++ binaries. See README.md for installation steps.
-#
-# 4. To regenerate this file with exact pinned versions for a frozen build,
-#    use: pip freeze > requirements-frozen.txt
-#    (Then commit both: requirements.txt for human-readable constraints,
-#     requirements-frozen.txt for byte-exact CI reproducibility.)

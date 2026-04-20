@@ -16,7 +16,6 @@
  *
  * 3. VISUAL MODE: Generate snapshots for dynamic operation visualization
  *    - Shows triangulation state after each phase
- *    - Useful for figures in publications
  *
  * Usage Examples:
  *   ./main static data/train/wine_train.csv data/test/wine_test_X.csv results/
@@ -24,12 +23,6 @@
  * results/log.csv
  *   ./main visualize_dynamic data/train/wine_train.csv
  * data/train/wine_stream.csv results/
- *
- * Fixes applied (Week 2 of the master action list):
- *               so that std::runtime_error from the updated CSV loaders
- *               (formerly exit(1)) surfaces with a clean error message and
- *               a non-zero exit code instead of an uncaught exception
- *               crashing the process.
  */
 
 #include "../include/DelaunayClassifier.h"
@@ -106,7 +99,7 @@ int main(int argc, char *argv[]) {
       classifier.run_dynamic_stress_test(argv[3], argv[4]);
     }
     // --- MODE 3: Dynamic Visualization ---
-    // Generates snapshots for publication figures
+    // Generates snapshots for figures
     else if (mode == "visualize_dynamic" && argc == 5) {
       std::string out_dir = argv[4];
 

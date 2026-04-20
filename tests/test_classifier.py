@@ -12,49 +12,12 @@ Validates correctness of:
 7. Point-in-polygon ray casting
 8. Dataset generation output format
 9. SF Crime dataset loading and validation
-10. Reproducibility — fixed-seed determinism
-11. C++ integration tests on real datasets
+10. C++ integration tests on real datasets
 
 Run with:
   python tests/test_classifier.py                    # All except slow integration tests
   RUN_SLOW_TESTS=1 python tests/test_classifier.py   # Including slow C++ integration
   pytest tests/test_classifier.py -v                 # With pytest
-
-Fixes applied (Week 3 of the master action list):
-              static mode runs on multiple datasets, accuracy on known-good
-              data, predictions.csv format validation, multi-class handling,
-              universal-HOMOGENEOUS finding verification (BI=0, MULTI=0
-              across all datasets), and grid size matches ceil(sqrt(n)).
-              These tests are gated by the RUN_SLOW_TESTS environment
-              variable (off by default since they take ~5 minutes total)
-              and skip gracefully if the C++ binary or datasets aren't
-              present.
-              dataset added in : file existence, expected row
-              count (~5000), format (3 columns, binary labels), and
-              spatial bounds (data should be normalized roughly to
-              [0, 1] x [0, 1] after preprocessing).
-              determinism: same seed produces identical data; different
-              seeds produce different data; C++ classifier is deterministic
-              for identical input; cross-seed aggregation logic produces
-              sensible mean/std.
-
-Quality fixes (not on the master list but obvious bugs):
-  - Fixed test_homogeneous_triangle_returns_unanimous which was a tautology
-    (assertEqual(label, 2) where label was hardcoded to 2). Now actually
-    tests the unanimous-vertex case logic.
-  - TestOutlierDetection clarified: the original test uses k-NN mean
-    distance which is NOT the actual algorithm (C++ uses DT connectivity
-    + connected components). Renamed and added a second test that mirrors
-    the actual DT-based logic for proper validation.
-  - TestDatasetGeneration now includes sfcrime in the expected dataset
-    list.
-  - TestDynamicOperations docstring clarified to flag that those tests
-    use scipy as a mathematical reference (NOT C++ validation). The C++
-    dynamic implementation is validated by TestCppClassifier.test_dynamic_mode_runs
-    (always-on smoke) and TestCppIntegration (slow integration tests).
-  - Added CPP_BUILD_DIR environment variable override for the C++ binary
-    location, supporting out-of-tree builds and alternate build configs
-    (e.g. build-debug/, build-release/).
 """
 
 import os
@@ -559,11 +522,6 @@ class TestDecisionBoundary(unittest.TestCase):
         self.assertEqual(classify_nearest(2.0, 3.5), 2)
 
     def test_homogeneous_triangle_returns_unanimous(self):
-        """All same class: should return that class regardless of position.
-
-        Quality fix: original test was a tautology (assertEqual(label, 2)
-        where label was hardcoded). Now actually tests the Case 1 logic.
-        """
         # Triangle with all three vertices same class (Case 1 in
         # classify_point_in_face)
         l0, l1, l2 = 5, 5, 5
@@ -896,18 +854,8 @@ class TestSfcrimeLoading(unittest.TestCase):
             f"y values should have spread; std={y.std()}")
 
 
-# ============================================================================
-# ============================================================================
-# Validates that fixed seeds produce identical data and that the C++
-# classifier is deterministic for identical input.
 
 class TestReproducibility(unittest.TestCase):
-    """Validate fixed-seed reproducibility .
-
-    These tests verify the core reproducibility claims that back the
-    multi-seed benchmark methodology in benchmark_cv.py and
-    ablation_study.py (Issues #29, #34).
-    """
 
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
@@ -1181,7 +1129,6 @@ class TestCppIntegration(unittest.TestCase):
 
     def test_accuracy_on_known_good_datasets(self):
         """Accuracy should be high on cleanly separable datasets."""
-        # Datasets where Full Pipeline was >= 95% in week3_v2 results
         expected = {
             'moons': 95.0, 'circles': 95.0, 'cassini': 95.0,
             'checkerboard': 92.0, 'earthquake': 92.0,
@@ -1309,9 +1256,15 @@ class TestCppIntegration(unittest.TestCase):
 # ============================================================================
 # Test Runner
 # ============================================================================
+STRICT_MIN_TESTS_RAN = 37
+
 
 def run_tests():
-    """Run all unit tests."""
+    """Run all unit tests.
+
+    Returns (was_successful: bool, result: unittest.TestResult) so the
+    caller can make strict-mode decisions based on the execution counts.
+    """
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
 
@@ -1330,32 +1283,76 @@ def run_tests():
         suite.addTests(loader.loadTestsFromTestCase(TestCppClassifier))
 
     suite.addTests(loader.loadTestsFromTestCase(TestSfcrimeLoading))
-
     suite.addTests(loader.loadTestsFromTestCase(TestReproducibility))
-
     suite.addTests(loader.loadTestsFromTestCase(TestCppIntegration))
 
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)
-    return result.wasSuccessful()
+    return result.wasSuccessful(), result
+
+
+def _strict_mode_check(result):
+    if not RUN_SLOW_TESTS:
+        return True, (
+            "(strict mode off: RUN_SLOW_TESTS=1 not set; skip counts "
+            "not checked)"
+        )
+
+    total_dispatched = result.testsRun
+    num_skipped = len(result.skipped)
+    num_executed = total_dispatched - num_skipped
+
+    if num_executed >= STRICT_MIN_TESTS_RAN:
+        return True, (
+            f"(strict mode: {num_executed} tests executed, "
+            f"{num_skipped} skipped — threshold {STRICT_MIN_TESTS_RAN} met)"
+        )
+
+    skip_lines = [f"  - {test.id()}: {reason}"
+                  for test, reason in result.skipped]
+    skip_detail = "\n".join(skip_lines) if skip_lines else "  (none reported)"
+
+    msg = (
+        f"STRICT MODE FAILURE: only {num_executed} tests actually "
+        f"executed, expected at least {STRICT_MIN_TESTS_RAN}.\n"
+        f"This means {num_skipped} tests were skipped, which usually "
+        f"indicates missing prerequisites (un-built C++ binary, "
+        f"un-generated datasets, missing generator script).\n"
+        f"Skipped tests:\n{skip_detail}\n"
+        f"To fix: ensure `cd build && make -j4` has run successfully, "
+        f"and `python scripts/generate_datasets.py` has populated "
+        f"data/train/ and data/test/."
+    )
+    return False, msg
 
 
 if __name__ == "__main__":
     print("=" * 70)
     print("DELAUNAY TRIANGULATION CLASSIFIER — UNIT TESTS")
     print("=" * 70)
-    if not RUN_SLOW_TESTS:
+    if RUN_SLOW_TESTS:
+        print(f"(Strict mode ON: RUN_SLOW_TESTS=1, requiring at least "
+              f"{STRICT_MIN_TESTS_RAN} tests to execute.)")
+    else:
         print("(Slow C++ integration tests SKIPPED. Set RUN_SLOW_TESTS=1 "
               "to enable.)")
     print("=" * 70)
 
-    success = run_tests()
+    success, result = run_tests()
+
+    strict_ok, strict_msg = _strict_mode_check(result)
 
     print("\n" + "=" * 70)
-    if success:
+    if success and strict_ok:
         print("ALL TESTS PASSED")
-    else:
+        print(strict_msg)
+    elif not success:
         print("SOME TESTS FAILED")
+        print(strict_msg)
+    else:
+        print("TESTS PASSED INDIVIDUALLY, BUT STRICT MODE CHECK FAILED")
+        print()
+        print(strict_msg)
     print("=" * 70)
 
-    sys.exit(0 if success else 1)
+    sys.exit(0 if (success and strict_ok) else 1)

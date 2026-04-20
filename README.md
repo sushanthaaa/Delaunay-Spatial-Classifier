@@ -58,8 +58,6 @@ Results from multi-seed experiments (5 seeds: 42, 123, 456, 789, 1000) on **MacB
 | **Scalability** | O(1) inference at 0.003-0.021 µs for n ≤ 300K | Cache transition at n ~ 1M (1.46 µs) due to L2 exhaustion |
 | **Universal-HOMOGENEOUS Buckets** | 100% across 12 datasets, 15K+ buckets | Confirmed structural property under SRR sizing |
 
-> **A note on inference timing:** Earlier versions of this README reported sub-microsecond numbers (0.002 µs) that were artifacts of integer-truncation in the pre-Week-3 timing code. The corrected nanosecond timing infrastructure yields the honest 0.034-0.053 µs/point figures above. Speedups have been recomputed accordingly.
-
 ---
 
 ## System Requirements
@@ -177,7 +175,7 @@ Delaunay-Triangulation-Classification/
 │
 ├── scripts/                            # Python scripts
 │   ├── generate_datasets.py            # Unified dataset generator (12 datasets, --seed support)
-│   ├── generate_figures.py             # Publication figure generator
+│   ├── generate_figures.py             # figure generator
 │   ├── benchmark_cv.py                 # Multi-seed CV with significance tests + per-class P/R/F1
 │   ├── ablation_study.py               # Multi-seed ablation orchestrator (wraps C++ ablation_bench)
 │   └── scalability_test.py             # Scalability analysis (training + O(1) inference)
@@ -206,7 +204,7 @@ Delaunay-Triangulation-Classification/
 │   ├── bucket_type_distribution.csv    # HOMO/BI/MULTI counts per dataset
 │   └── confusion_matrix_{dataset}_{algorithm}.csv  # Per-(dataset,algorithm) aggregated CMs
 │
-├── figures/                            # Generated publication figures
+├── figures/                            # Generated figures
 │   ├── {dataset}/                      # Per-dataset pipeline figures (Fig 1-7)
 │   ├── confusion_matrices/{dataset}.png  # Per-dataset multi-algorithm CM panels
 │   └── summary_*.png                   # Summary comparison charts
@@ -435,7 +433,7 @@ python scripts/scalability_test.py --sizes 100,1000,10000 --repeats 3
 
 ---
 
-### Benchmark 6: Publication Figure Generation
+### Benchmark 6: Figure Generation
 
 ```bash
 # Generate all figures (per-dataset pipeline + summary charts + bucket figures + confusion matrices)
@@ -549,7 +547,7 @@ python scripts/scalability_test.py
 echo "=== Unit Tests (~5 min) ==="
 RUN_SLOW_TESTS=1 python tests/test_classifier.py
 
-# 8. Generate publication figures
+# 8. Generate figures
 echo "=== Generating Figures (~5-15 min) ==="
 python scripts/generate_figures.py
 
@@ -563,8 +561,6 @@ echo "=== Complete! Results in results/ and figures/ ==="
 ---
 
 ## Benchmark Results
-
-All accuracy and inference numbers below are **multi-seed mean ± std across 5 seeds** (42, 123, 456, 789, 1000) from the canonical Week 3 v2 snapshot in `results/week3_v2/`. Earlier single-seed numbers in this README's history have been superseded.
 
 ### Platform
 
@@ -687,7 +683,6 @@ From `results/scalability_train.csv` and `results/scalability_inference.csv`. Mu
 
 ### Multi-Seed Evaluation
 
-All headline numbers in this README come from **multi-seed runs** (seeds: 42, 123, 456, 789, 1000) with cross-seed mean ± std reporting. This methodology was adopted in Week 3 of the project to:
 
 1. Reduce single-seed luck (especially relevant for small datasets like wine where ±5% accuracy swings are common)
 2. Provide statistically-defensible error bars for paper tables
@@ -731,10 +726,6 @@ bloodmnist uses MedMNIST's fixed train/test split, so accuracy std = 0 across se
 ### n=1M cache transition
 
 Inference is true O(1) only within the L2-resident range (n ≤ 300K on M3 with 16 MB L2). Beyond that, the bucket grid exceeds L2 and inference time grows from ~0.20 µs to ~3.05 µs at n=1M due to DRAM access latency. The algorithm itself remains O(1); this is a hardware limit. Larger-cache machines (e.g., server CPUs with 64+ MB L3) will push the transition point higher.
-
-### Per-bucket distribution metrics not yet exposed
-
-The C++ implementation tracks per-bucket polygon and vertex counts internally (via `BucketOccupancyStats`), but does not currently expose them to the CLI for plotting. Summary mean is available (1.0 across all datasets, validating SRR sizing); full distribution histograms are planned (internal Issues #47, #48).
 
 ---
 

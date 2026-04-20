@@ -2,19 +2,7 @@
  * @file benchmark.cpp
  * @brief Fair C++ Benchmark Suite for Delaunay Classifier vs. Baselines
  *
- * Compares five algorithms on accuracy, inference speed, and dynamic updates:
- *   2. LibSVM (RBF)     — (C, gamma) tuned per dataset via 5-fold CV (Issue
- * #16)
- *   5. Delaunay (Ours)  — O(1) expected via 2D Buckets
- *
  * All implementations in C++ with -O3 optimization for fair comparison.
- *
- * Fixes applied (Week 2 of the master action list):
- *               vectors and reported as mean ± std.
- *               1/(n_features * var), computed with explicit n_features = 2.
- *               5-fold grid-search CV.
- *               split candidates (previously sampled every 20th value).
- *               k ∈ {1, 3, 5, 7, 9, 11, 15}.
  */
 
 #include <algorithm>
@@ -36,10 +24,6 @@
 // =============================================================================
 // BENCHMARK CONFIGURATION CONSTANTS
 // =============================================================================
-//
-// All magic numerical values used by the benchmark harness are declared here
-// as named constants. These control measurement fidelity, not algorithm
-// behavior, so reviewers should not mistake them for tuned hyperparameters.
 
 namespace {
 
@@ -109,7 +93,6 @@ struct BenchmarkResult {
 };
 
 /// Dynamic benchmark result with mean and standard deviation per operation.
-/// so reviewers can assess measurement stability.
 struct DynamicResult {
   std::string method;
   double insert_ns_mean;
@@ -247,10 +230,6 @@ static double sklearn_scale_gamma(double total_variance) {
 // =============================================================================
 // CROSS-VALIDATION SPLIT HELPER
 // =============================================================================
-//
-// Creates stratified k-fold indices for CV. Returns a vector of (train_idx,
-// val_idx) pairs, one per fold. Uses a fixed seed for reproducibility so the
-// same fold split is reused across all baselines within one benchmark run.
 
 static std::vector<std::pair<std::vector<int>, std::vector<int>>>
 make_cv_folds(int n_samples, int n_folds, unsigned int seed = 42) {
@@ -433,7 +412,7 @@ knn_cv_select_k(const std::vector<std::tuple<float, float, int>> &train_data) {
 }
 
 // =============================================================================
-// LibSVM Wrapper — with grid-search CV tuning (Issues #15, #16)
+// LibSVM Wrapper — with grid-search CV tuning
 // =============================================================================
 
 class SVMClassifier {
@@ -535,9 +514,6 @@ public:
  *   3. Runs k-fold CV on the training set, picking the (C, gamma) with
  *      the highest mean validation accuracy
  *   4. Returns the best (C, gamma) pair for use in the final fit
- *
- * This is the standard methodology used by sklearn's GridSearchCV and is
- * what reviewers expect from a publication-grade baseline comparison.
  */
 static std::pair<double, double> svm_cv_select_params(
     const std::vector<std::tuple<float, float, int>> &train_data,
@@ -771,21 +747,6 @@ public:
   int predict(float x, float y) { return predict_node(root_, x, y); }
 };
 
-// =============================================================================
-// =============================================================================
-//
-// from the C++ benchmark, which reviewers flagged as incomplete (modern
-// tree-based methods should include RF as a baseline).
-//
-// Implementation:
-//   - N trees trained on bootstrap samples (sampling with replacement)
-//   - Prediction via majority vote across all trees
-//   - Seeded RNG for reproducibility
-//
-// Note: This is a classic bagging RF, not a "true" RF with feature
-// subsampling at each split. For a 2D classifier, feature subsampling
-// doesn't make much sense (you'd either see both features or neither).
-
 class RandomForestCpp {
 private:
   std::vector<DecisionTreeCpp *> trees_;
@@ -878,12 +839,6 @@ void print_static_results(const std::vector<BenchmarkResult> &results,
   std::cout << std::string(95, '=') << std::endl;
 }
 
-/**
- *
- * Previously showed only means. Now shows "mean ± std" for each operation
- * type so reviewers can assess measurement stability. The num_ops column
- * shows how many operations contributed to each statistic.
- */
 void print_dynamic_results(const std::vector<DynamicResult> &results,
                            const std::string &dataset_name) {
   std::cout << "\n" << std::string(120, '=') << std::endl;
@@ -990,7 +945,7 @@ int main(int argc, char *argv[]) {
   }
 
   // ============================================
-  // STATIC 2: LibSVM — grid-search CV (Issues #15, #16)
+  // STATIC 2: LibSVM — grid-search CV
   // ============================================
   {
     std::cout << "\n[2/5] Running LibSVM C++ (RBF, grid-search CV)..."

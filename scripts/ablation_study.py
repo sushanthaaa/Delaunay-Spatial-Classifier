@@ -36,15 +36,6 @@ Outputs:
   results/ablation_dynamic_summary.csv      — Cross-seed aggregated dynamic
   results/ablation_dynamic_per_seed.csv     — Raw per-seed dynamic data
 
-Fixes applied (Week 3 of the master action list):
-              (the same dataset added in .
-              used by benchmark_cv.py . Each seed regenerates all
-              datasets fresh into a temp directory, runs ablation_bench per
-              (dataset, seed) combination, and aggregates static and dynamic
-              results across seeds. The C++ binary writes per-dataset CSVs to
-              results/ablation_{dataset}.csv with a fixed path; we read these
-              into memory immediately after each run before they are
-              overwritten by the next seed's run.
 """
 
 import argparse
@@ -151,11 +142,6 @@ def cleanup_seed_dirs(seed_roots):
 
 def run_ablation_for_seed(dataset_name, seed_root, project_root, seed):
     """Run C++ ablation_bench for one (dataset, seed) and read its CSV outputs.
-
-    The C++ binary writes its CSVs to project_root/results/ with fixed names
-    (ablation_{dataset}.csv and ablation_dynamic_{dataset}.csv). We must
-    read them into memory immediately after each run, because subsequent
-    runs (for other seeds or other datasets) will overwrite them.
 
     Returns (static_df, dynamic_df) — each with a 'seed' and 'dataset'
     column added, or (None, None) if the run failed.

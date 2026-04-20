@@ -21,7 +21,7 @@
 #   - Dataset generation runs FIRST so real-world datasets are cached
 #     before multi-seed scripts try to regenerate them 5 times each.
 #   - Single-seed C++ ablation_bench loop is INTENTIONALLY SKIPPED — it's
-#     superseded by the multi-seed scripts/ablation_study.py (Issue #34).
+#     superseded by the multi-seed scripts/ablation_study.py .
 #     Running both would waste 5-10 min and cause CSV overwrites.
 #   - Figures run LAST, after all data CSVs exist.
 #   - caffeinate prevents macOS from sleeping during the long run.
@@ -189,7 +189,7 @@ run_step "3. Scalability test (n=100 to n=1M)" \
 #   - results/cv_summary.csv (paper-headline accuracy table)
 #   - results/significance_tests.csv (Bonferroni-corrected paired tests)
 #   - results/per_class_metrics.csv
-#   - results/confusion_matrix_{dataset}_{algorithm}.csv (feeds Issue #37 figures)
+#   - results/confusion_matrix_{dataset}_{algorithm}.csv 
 run_step "4. Multi-seed CV benchmark (12 datasets x 5 seeds)" \
     python scripts/benchmark_cv.py
 
@@ -216,7 +216,7 @@ else
 fi
 
 # =============================================================================
-# STEP 7: Generate all publication figures
+# STEP 7: Generate all figures
 # =============================================================================
 # Must run LAST — consumes outputs from steps 3-5.
 # --regenerate-bucket-stats to pick up any schema changes from step 2.
@@ -242,8 +242,6 @@ for status in "${STEP_STATUS[@]}"; do
     fi
 done
 
-# Compose the summary text first, then both display AND write it in one pass.
-# This avoids the subshell-variable-scope issue with `{ ... } | tee`.
 {
     echo ""
     echo "============================================================="
@@ -282,7 +280,7 @@ done
     echo "  - results/ablation_dynamic_summary.csv (multi-seed dynamic ops)"
     echo "  - results/scalability_train.csv     (training timing)"
     echo "  - results/scalability_inference.csv (O(1) validation)"
-    echo "  - figures/summary_*.png             (publication figures)"
+    echo "  - figures/summary_*.png             (figures)"
     echo "  - figures/confusion_matrices/       (per-dataset CM panels)"
     echo ""
     if [ "$N_FAIL" -eq 0 ]; then

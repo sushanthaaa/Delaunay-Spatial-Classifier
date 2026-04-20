@@ -21,33 +21,6 @@ Outputs:
   results/scalability_inference.csv   — Inference time at each n
   results/scalability_plots.png       — Log-log visualization
 
-Fixes applied (Week 3 of the master action list):
-              measuring training time. Previously, training time was
-              computed as `subprocess_wall_clock_ms - total_inference_ms`,
-              which conflates three things: subprocess startup overhead
-              (10-50 ms), filesystem I/O for CSVs, and actual algorithmic
-              training cost. At small n (100 points) the subprocess
-              startup alone could be 50x larger than the true training
-              time, making the reported numbers meaningless.
-              structured output. This line is emitted by main.cpp after
-              the companion C++ change (see MIGRATION_GUIDE.md
-              and reports training time as measured internally by
-              std::chrono::high_resolution_clock, excluding all
-              subprocess/IO/startup overhead.
-
-              session's C++ changes, DelaunayClassifier.cpp's
-              predict_benchmark() was changed from integer-microsecond
-              precision to nanosecond precision, so sub-microsecond
-              Delaunay inference times are no longer truncated to 0.
-              This script now reports correct inference timing for all
-              dataset sizes (previously small-n inference appeared as
-              0.0 due to the C++ truncation bug).
-
-Required companion C++ changes (see MIGRATION_GUIDE.md for exact edits):
-  - src/main.cpp : wrap classifier.train() in chrono timing, emit
-                   "Training Time: X.XXXX ms" after the training completes
-  - src/DelaunayClassifier.cpp : change predict_benchmark()'s timing
-                   computation to use nanoseconds + double arithmetic
 """
 
 import argparse
@@ -78,7 +51,6 @@ DEFAULT_SIZES = [100, 1000, 10000, 100000, 300000, 1000000]
 # multi-class work while keeping bucket occupancy reasonable.
 N_CLASSES = 5
 
-# Fixed test set size across all training sizes. This is the key to testing
 # O(1) inference: we measure per-point inference time on the SAME test set
 # regardless of how large the training set is. If inference is O(1), the
 # per-point time should be flat across all training sizes.
@@ -243,9 +215,6 @@ def run_scalability_test(root_dir, sizes, n_classes, n_inference_samples,
     print(f"Seed: {seed}")
     print("=" * 70)
 
-    # Fixed test set for fair inference comparison across all training sizes.
-    # Using seed+1 for the test set so it's deterministic relative to the run
-    # seed but distinct from the training data distribution.
     X_test, y_test = generate_synthetic_data(
         n_inference_samples, n_classes, seed + 1)
 

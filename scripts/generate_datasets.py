@@ -44,25 +44,6 @@ Cached real-world data (shipped in repo for reproducibility):
 All files use CSV format with no header: x,y[,label]
 Random seed: 42 by default, configurable via --seed
 
-Fixes applied (Week 3 of the master action list):
-              if present. Live USGS API fetch is used only as a fallback for
-              the first-time generation, and the result is then saved to the
-              cache so subsequent runs are fully reproducible and don't depend
-              on upstream API availability.
-              data/cached/bloodmnist_{train,test}_centroids.csv if present.
-              The medmnist package download + scikit-image extraction pipeline
-              is used only as a fallback for the first-time generation.
-              as property vs violent crime. Binary classification, balanced
-              5000 samples, city-scale (~10 km x 10 km bounding box). This is
-              the second real-world spatial dataset in the benchmark (after
-              earthquake) and the only city-scale one, complementing the
-              planet-scale earthquake data. Follows the same cache-first
-              pattern as earthquake for reproducibility.
-              applied before any generation runs. The module-level constant
-              RANDOM_SEED is retained only as the default value; all generators
-              receive seed as an explicit parameter and pass it to sklearn's
-              random_state arguments. For seed=42 the output data is
-              byte-identical to the pre-fix version.
 """
 
 import argparse
@@ -192,8 +173,6 @@ def generate_spiral(seed):
     noise = 0.3
 
     # Spiral uses numpy's global random state for backward compatibility
-    # with the pre-Issue-#27 output (seed=42 produces byte-identical data).
-    # The global seed is set once in main() before any generator runs.
     r = theta
     x1 = r * np.cos(theta) + np.random.randn(n_per_class) * noise
     y1 = r * np.sin(theta) + np.random.randn(n_per_class) * noise

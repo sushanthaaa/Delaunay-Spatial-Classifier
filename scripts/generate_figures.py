@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-Unified Publication Figure Generator for Delaunay Triangulation Classifier
+Figure Generator for Delaunay Triangulation Classifier
 
-Generates ALL publication figures from a single script, matching the visual
-style of the V19 paper:
+Generates ALL figures from a single script:
   - Red solid lines: same-class DT edges
   - Red dashed lines: cross-class DT edges
   - Black solid lines: decision boundaries (extended to plot borders)
@@ -11,11 +10,6 @@ style of the V19 paper:
   - White background, black border frame, no axis ticks
   - Gray dotted grid for SRR/2D Buckets overlay
 
-Figure categories:
-  A. Per-dataset pipeline figures (1-7 per dataset)
-  B. Summary comparison charts (accuracy, speedup, dynamic, scalability)
-  C. Bucket structural figures (Issues #35a, #36) — universal-HOMOGENEOUS finding
-  D. Confusion matrix figures — per-dataset multi-algorithm panels
 
 Usage:
   python scripts/generate_figures.py                           # All
@@ -25,36 +19,6 @@ Usage:
                                                                  refresh bucket
                                                                  stats CSV
 
-Fixes applied (Week 3 of the master action list):
-               figure generator covers the same 12 datasets as
-               benchmark_cv.py and ablation_study.py.
-               universal-HOMOGENEOUS finding: across all 12 datasets and
-               all 15,000+ buckets, every bucket is HOMOGENEOUS (Case A).
-               BIPARTITIONED and MULTI_PARTITIONED counts are zero. The
-               figure is a stacked bar showing this empirical observation
-               that motivates the simplified-classification framing in
-               the paper. Bucket counts are obtained by parsing the C++
-               binary's "2D Buckets Grid Statistics" stdout block, cached
-               to results/bucket_type_distribution.csv.
-               polygons-per-bucket per dataset, derived from the same
-               parsed stats data (total_polygons / total_buckets).
-               This is a partial fix; full per-bucket distribution
-               histograms require exposing BucketOccupancyStats via the
-               C++ CLI (tracked as Week 7 issues #47, #48).
-               the C++ binary to write per-bucket counts to disk
-               (currently only summary stats are exposed). See the
-               chart_vertices_per_bucket_histogram() stub for the planned
-               interface; it is a no-op pending the C++ change.
-               figure per dataset showing confusion matrices for all 5
-               algorithms side-by-side. Reads the per-dataset, per-algorithm
-               confusion matrix CSVs produced by benchmark_cv.py .
-
-Updated:
-  - chart_ablation_accuracy() now reads accuracy_mean / accuracy_std from
-    multi-seed ablation_summary.csv with error bars, falling
-    back to the old single-seed 'accuracy' column for compatibility.
-  - chart_accuracy_comparison() prefers multi-seed cv_summary.csv
-    when present, falling back to per-dataset cpp_benchmark_*.csv files.
 """
 
 import argparse
@@ -75,9 +39,6 @@ from sklearn.neighbors import NearestNeighbors
 
 warnings.filterwarnings('ignore')
 
-# =============================================================================
-# STYLE CONFIGURATION — matches V19 paper exactly
-# =============================================================================
 
 # Marker shapes per class (up to 10 classes)
 MARKERS = ['s', '^', 'o', 'D', 'p', 'h', '*', 'v', '<', '>']
@@ -624,19 +585,13 @@ def fig_7_query_classification(X, y, X_stream, y_stream, name, out_dir):
 
 
 # =============================================================================
-# BUCKET STATISTICS (Issues #35a, #36)
+# BUCKET STATISTICS
 # =============================================================================
 # The C++ binary prints a "2D Buckets Grid Statistics" block to stdout
 # during training. We parse that block to extract HOMO/BI/MULTI counts and
 # total polygons per dataset. Cached to results/bucket_type_distribution.csv
 # so this doesn't need to re-run unless --regenerate-bucket-stats is passed.
 
-# Regex matches lines like:
-#   "Grid size: 29 x 29 = 841 buckets"
-#   "Homogeneous (Case A):     841"
-#   "Bipartitioned (Case B):   0"
-#   "Multi-partitioned (Case C): 0"
-#   "Total polygon regions:    841"
 GRID_SIZE_RE = re.compile(
     r'Grid size:\s*(\d+)\s*x\s*(\d+)\s*=\s*(\d+)\s*buckets')
 HOMO_RE = re.compile(r'Homogeneous\s*\(Case A\):\s*(\d+)')
@@ -834,10 +789,6 @@ def chart_bucket_occupancy_summary(root_dir, figures_dir,
     this should be approximately 1.0 for HOMOGENEOUS-dominated grids,
     confirming the O(1) inference claim.
 
-    NOTE: The full per-bucket distribution (max/std/p99) requires
-    exposing BucketOccupancyStats via the C++ CLI, tracked as
-    Week 7 issues #47 (print in print_statistics) and #48 (--bucket-stats
-    JSON output). Until then, only the mean is shown here.
     """
     df = collect_bucket_stats(root_dir, ALL_DATASETS, force_regenerate)
     if df is None or df.empty:
@@ -879,25 +830,6 @@ def chart_bucket_occupancy_summary(root_dir, figures_dir,
     save_fig(fig, f'{figures_dir}/summary_bucket_occupancy.png')
 
 
-# =============================================================================
-# =============================================================================
-
-def chart_vertices_per_bucket_histogram(root_dir, figures_dir):
-    """Per-bucket vertex count histogram — DEFERRED to Week 7.
-
-    to a CSV by the C++ binary. The data is available internally via
-    DelaunayClassifier::get_bucket_vertex_counts() (added in ,
-    but is not currently exposed through the CLI.
-
-    Tracked as Week 7 issues #47 (add to print_statistics) and #48
-    (--bucket-stats JSON output). Once the C++ binary writes a
-    bucket_vertex_counts_{dataset}.csv file, this function will:
-      1. Load each dataset's per-bucket vertex count CSV
-      2. Generate a multi-panel histogram (one panel per dataset)
-      3. Annotate with mean, std, max, p99 from BucketOccupancyStats
-    """
-    print("  [DEFERRED] vertices-per-bucket histogram (#36a) — "
-          "requires C++ change tracked as Week 7 issues #47/#48")
 
 
 # =============================================================================
@@ -1508,7 +1440,7 @@ def generate_dataset_figures(ds_key, root_dir, figures_dir):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate publication figures for "
+        description="Generate figures for "
                     "Delaunay Triangulation Classifier")
     parser.add_argument('--datasets', default='all',
                         help='Comma-separated dataset names or "all"')
@@ -1534,7 +1466,7 @@ def main():
     np.random.seed(42)
 
     print("=" * 70)
-    print("PUBLICATION FIGURE GENERATOR")
+    print("FIGURE GENERATOR")
     print(f"Output: {figures_dir}")
     print("=" * 70)
 
@@ -1556,8 +1488,6 @@ def main():
                                    force_regenerate=args.regenerate_bucket_stats)
     chart_bucket_occupancy_summary(root_dir, figures_dir,
                                    force_regenerate=False)
-    chart_vertices_per_bucket_histogram(root_dir, figures_dir)
-
     print("\n  [CONFUSION MATRIX FIGURES]")
     chart_confusion_matrices(root_dir, figures_dir, datasets)
 

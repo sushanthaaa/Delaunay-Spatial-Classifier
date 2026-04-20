@@ -36,33 +36,6 @@ Outputs:
   results/per_class_metrics_{dataset}.csv         — Per-class P/R/F1 for each classifier
   results/confusion_matrix_{dataset}_{alg}.csv    — Aggregated confusion matrices
 
-Fixes applied (Week 3 of the master action list):
-              generate_datasets.py list (12 datasets total).
-              multi-seed benchmarking across [42, 123, 456, 789, 1000].
-              Each seed regenerates all datasets fresh (via a subprocess
-              call to generate_datasets.py writing to a temp directory),
-              runs the classifier suite once per dataset, and aggregates
-              accuracy and per-class metrics across seeds. The data/cached/
-              directory is copied into each temp dir so earthquake/sfcrime/
-              bloodmnist cache hits work as expected (offline-safe).
-              matching the methodology used by benchmark.cpp:
-                - KNN: 5-fold CV over k in {1, 3, 5, 7, 9, 11, 15}
-                - SVM: 5-fold CV over C in {0.1, 1, 10, 100} x gamma in
-                       {0.1, 1, 10, 100} * sklearn's 'scale' heuristic
-              Decision Tree and Random Forest were already using exhaustive
-              splits and 100 trees respectively, matching benchmark.cpp, so
-              they required no changes.
-
-              This closes the methodological gap between benchmark_cv.py and
-              benchmark.cpp so results from the two scripts can be compared
-              directly in the paper's results table.
-              precision_recall_fscore_support. For each (dataset, algorithm)
-              pair, we store the per-seed metrics, then report mean +/- std
-              across seeds. Confusion matrices are aggregated by concatenating
-              all predictions from all seeds into one large y_true/y_pred pair
-              and computing a single matrix — this is the statistically
-              correct aggregation (element-wise averaging of normalized
-              matrices would double-count).
 """
 
 import argparse
@@ -186,15 +159,6 @@ def run_cpp_delaunay(train_X, train_y, test_X, cpp_exe, results_dir):
     Writes train and test data to temp CSVs, invokes the C++ binary in
     'static' mode, and parses the output CSV for predictions. The C++ binary
     prints an "Avg Time Per Point" line which we scrape for timing.
-
-    NOTE: The C++ binary currently reports integer-microsecond precision,
-    so sub-microsecond Delaunay inference (~2-8 ns per point) is truncated
-    to 0 in the output. This is a known limitation tracked as
-    and scheduled for Week 7 polish, which will change
-    DelaunayClassifier.cpp's predict_benchmark() to use nanosecond
-    precision. Until then, Delaunay timing from this script is unreliable
-    for small-inference cases; the paper's timing claims should come from
-    benchmark.cpp directly.
     """
     with tempfile.NamedTemporaryFile(
             mode='w', suffix='.csv', delete=False) as f:

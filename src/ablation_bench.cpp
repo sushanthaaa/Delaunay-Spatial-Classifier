@@ -11,17 +11,6 @@
  *
  * Dynamic ablation:
  *   D1: Full Dynamic — insert/move/delete with local bucket rebuild
- *
- * Fixes applied (Week 2 of the master action list):
- *               test_data.size(). Matches the bump applied to benchmark.cpp
- *               so the dynamic ablation's measurement count is consistent
- *               with the main benchmark.
- *               vectors and reports mean ± std (Bessel-corrected) for
- *               insert/move/delete. The CSV output and print function were
- *               extended to carry the std columns alongside the means.
- *               std::runtime_error so that file-open failures from the
- *               updated CSV loaders surface cleanly with a non-zero exit
- *               code instead of propagating uncaught.
  */
 
 #include <algorithm>
@@ -43,9 +32,6 @@
 // =============================================================================
 // BENCHMARK CONFIGURATION CONSTANTS
 // =============================================================================
-//
-// Named constants for measurement parameters. These control the harness, not
-// the algorithm — reviewers should not mistake them for tuned hyperparameters.
 
 namespace {
 
@@ -194,12 +180,6 @@ void print_ablation_table(const std::vector<AblationResult> &results,
   std::cout << std::string(105, '=') << std::endl;
 }
 
-/**
- *
- * Previously showed only means. Now shows "mean ± std" for each operation
- * type so reviewers can assess measurement stability. The num_ops column
- * shows how many operations contributed to each statistic.
- */
 void print_dynamic_ablation_table(
     const std::vector<DynamicAblationResult> &results,
     const std::string &title) {

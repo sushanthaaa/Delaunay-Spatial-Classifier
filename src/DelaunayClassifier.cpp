@@ -70,9 +70,6 @@ constexpr double VORONOI_BBOX_MARGIN_MULTIPLIER = 2.0;
 /// RATIONALE: 1% represents a realistic "small perturbation" in streaming
 /// data scenarios (e.g., sensor drift, GPS jitter). For large movements,
 /// the move_point() function falls back to delete+insert.
-/// REPORTING: This constant MUST be documented in the paper's Section 4
-/// (Experimental Setup) so reviewers don't mistake it for a tuned
-/// hyperparameter.
 constexpr double DYNAMIC_MOVE_OFFSET_FRACTION = 0.01;
 
 // -------- Floating-point epsilon constants --------
@@ -428,10 +425,6 @@ int DelaunayClassifier::classify_point_in_face(Face_handle f, Point p) const {
   }
 
   // CASE 3: Three distinct classes.
-  //
-  // Algorithm 4 (Jan et al. V19) specifies: compute the triangle centroid and
-  // connect it to the midpoints of all three edges, producing a Y-shaped
-  // boundary that partitions the triangle into three quadrilateral regions.
   //
   // We approximate this partition using nearest-vertex assignment. The two
   // partitions are:
