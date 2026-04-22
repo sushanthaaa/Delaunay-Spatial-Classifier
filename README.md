@@ -113,7 +113,10 @@ python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 
-# Step 5: Verify installation
+# Step 5: Generate datasets
+python scripts/generate_datasets.py
+
+# Step 6: Verify installation
 ./build/main static data/train/wine_train.csv data/test/wine_test_y.csv results/
 ```
 
@@ -122,7 +125,7 @@ pip install -r requirements.txt
 ```bash
 sudo apt-get update
 sudo apt-get install cmake libcgal-dev libflann-dev libsvm-dev liblz4-dev
-# Then follow steps 2-5 above (omit the macOS-specific CGAL_DIR/CMAKE_PREFIX_PATH flags).
+# Then follow steps 2-6 above (omit the macOS-specific CGAL_DIR/CMAKE_PREFIX_PATH flags).
 ```
 
 ### Windows (vcpkg)
@@ -151,7 +154,10 @@ python -m venv venv
 .\venv\Scripts\activate
 pip install -r requirements.txt
 
-# Step 5: Verify installation
+# Step 5: Generate datasets
+python scripts\generate_datasets.py
+
+# Step 6: Verify installation
 .\build\Release\main.exe static data\train\wine_train.csv data\test\wine_test_y.csv results\
 ```
 
@@ -790,12 +796,11 @@ If you use this code in your research, please cite:
 
 ```bibtex
 @article{delaunay_classifier_2026,
-  title={Real-Time Spatial Classification via Delaunay Triangulation
-         with O(1) Point Location},
-  author={[Your Name]},
-  journal={[Target Journal]},
+  title={Real-Time Spatial Classification via 
+         Delaunay Triangulation with O(1) Point Location},
+  author={Sushanth Purushothama},
   year={2026},
-  note={Multi-seed experiments (5 seeds) on MacBook Pro M3, macOS 26, 16GB RAM}
+  journal={IEEE Transactions on Knowledge and Data Engineering}
 }
 ```
 
