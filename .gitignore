@@ -58,6 +58,7 @@ Makefile
 data/**/*.csv
 !data/train/.gitkeep
 !data/test/.gitkeep
+!data/cached/*.csv
 data/medmnist/
 
 # ------------------------------------------------------------------------------
