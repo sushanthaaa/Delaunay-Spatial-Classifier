@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# Code Ocean reproducible run entrypoint
+# Paper: Real-Time Spatial Classification via Delaunay Triangulation
+#        with O(1) Point Location (IEEE TKDE submission)
+# ==============================================================================
+set -euo pipefail
+
+MODE="${1:-${MODE:-standard}}"
+
+echo "=============================================================="
+echo "Delaunay Triangulation Classifier — Code Ocean reproducible run"
+echo "Mode: $MODE"
+echo "Start: $(date)"
+echo "=============================================================="
+
+CODE_DIR="/code"
+DATA_DIR="/data"
+RESULTS_DIR="/results"
+BUILD_DIR="${CODE_DIR}/build"
+
+mkdir -p "${RESULTS_DIR}" "${BUILD_DIR}"
+
+# Make /data and /results visible at the paths Python scripts expect
+if [ ! -e "${CODE_DIR}/data" ]; then
+    ln -sfn "${DATA_DIR}" "${CODE_DIR}/data"
+fi
+if [ ! -e "${CODE_DIR}/results" ]; then
+    ln -sfn "${RESULTS_DIR}" "${CODE_DIR}/results"
+fi
+
+# Step 1: Build C++ binaries
+echo ""
+echo "[BUILD] Compiling C++ binaries with -O3..."
+cd "${BUILD_DIR}"
+cmake "${CODE_DIR}" -DCMAKE_BUILD_TYPE=Release
+make -j"$(nproc)"
+cd "${CODE_DIR}"
+
+for bin in main benchmark ablation_bench; do
+    if [ ! -x "${BUILD_DIR}/${bin}" ]; then
+        echo "ERROR: build/${bin} not produced. Aborting."
+        exit 1
+    fi
+done
+
+# Step 2: Generate datasets (uses cached real-world data; no network needed)
+echo ""
+echo "[DATA] Generating all 12 datasets from /data/cached..."
+python "${CODE_DIR}/scripts/generate_datasets.py"
+
+# Step 3: Mode-dispatched benchmarks
+case "$MODE" in
+    quick)
+        echo ""
+        echo "[QUICK] Running unit tests + 3 representative datasets..."
+        RUN_SLOW_TESTS=0 python "${CODE_DIR}/tests/test_classifier.py" || true
+        for ds in moons wine earthquake; do
+            echo "  cpp_benchmark: ${ds}"
+            "${BUILD_DIR}/benchmark" \
+                "${DATA_DIR}/train/${ds}_train.csv" \
+                "${DATA_DIR}/test/${ds}_test_y.csv" "${ds}"
+        done
+        python "${CODE_DIR}/scripts/generate_figures.py" \
+            --datasets moons,wine,earthquake --summary-only
+        ;;
+
+    standard)
+        echo ""
+        echo "[STANDARD] All 12 datasets, single-seed benchmark..."
+        for ds in moons circles spiral gaussian_quantiles cassini checkerboard \
+                  blobs earthquake sfcrime wine cancer bloodmnist; do
+            if [ -f "${DATA_DIR}/train/${ds}_train.csv" ]; then
+                echo "  cpp_benchmark: ${ds}"
+                "${BUILD_DIR}/benchmark" \
+                    "${DATA_DIR}/train/${ds}_train.csv" \
+                    "${DATA_DIR}/test/${ds}_test_y.csv" "${ds}" \
+                    || echo "  WARN: ${ds} failed, continuing"
+            fi
+        done
+        echo "[SCALABILITY] Testing n=100 to n=100K..."
+        python "${CODE_DIR}/scripts/scalability_test.py" \
+            --sizes 100,1000,10000,100000 --repeats 2
+        echo "[FIGURES] Generating all figures..."
+        python "${CODE_DIR}/scripts/generate_figures.py"
+        ;;
+
+    full)
+        echo ""
+        echo "[FULL] Multi-seed CV benchmark..."
+        python "${CODE_DIR}/scripts/benchmark_cv.py"
+        echo "[FULL] Multi-seed ablation study..."
+        python "${CODE_DIR}/scripts/ablation_study.py"
+        echo "[FULL] Scalability test..."
+        python "${CODE_DIR}/scripts/scalability_test.py"
+        echo "[FULL] Unit tests with slow integration..."
+        RUN_SLOW_TESTS=1 python "${CODE_DIR}/tests/test_classifier.py" || true
+        echo "[FULL] All figures..."
+        python "${CODE_DIR}/scripts/generate_figures.py" \
+            --regenerate-bucket-stats
+        ;;
+
+    *)
+        echo "ERROR: Unknown MODE='$MODE'. Use: quick | standard | full"
+        exit 1
+        ;;
+esac
+
+echo ""
+echo "=============================================================="
+echo "Reproducible run complete. Outputs in /results."
+echo "End: $(date)"
+echo "=============================================================="

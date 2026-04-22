@@ -60,6 +60,7 @@ if(NOT LIBSVM_FOUND)
       /opt/homebrew/include        # Apple Silicon Homebrew
       /usr/local/include           # Intel macOS Homebrew, or custom installs
       /usr/include                 # Linux system package
+      /usr/include/libsvm
   )
   find_library(LIBSVM_LIB svm
     HINTS
