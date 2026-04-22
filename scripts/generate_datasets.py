@@ -716,10 +716,13 @@ def generate_bloodmnist(seed, root, force_fetch=False):
         from skimage.measure import regionprops, label as ski_label
 
     try:
+        medmnist_dir = f"{root}/data/medmnist"
+        os.makedirs(medmnist_dir, exist_ok=True)
+        
         train_dataset = BloodMNIST(split='train', download=True,
-                                   root=f"{root}/data/medmnist")
+                                   root=medmnist_dir)
         test_dataset = BloodMNIST(split='test', download=True,
-                                  root=f"{root}/data/medmnist")
+                                  root=medmnist_dir)
 
         def extract_centroids(dataset):
             centroids, labels = [], []
