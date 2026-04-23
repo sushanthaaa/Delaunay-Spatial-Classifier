@@ -1,0 +1,32 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "Delaunay-Spatial-Classifier: Real-Time Spatial Classification via Delaunay Triangulation with O(1) Point Location"
+abstract: >
+  A C++/Python hybrid spatial classifier that combines Delaunay triangulation-based
+  outlier detection with a grid-based Voronoi bucket index, achieving O(1) expected-time
+  point location for classification inference. Benchmarked against FLANN KNN, LibSVM
+  (RBF), Decision Tree, and Random Forest across 12 datasets including synthetic 2D,
+  real-world GIS (USGS earthquake, SF Open Data crime), and PCA-reduced non-spatial
+  (UCI Wine, UCI Breast Cancer, BloodMNIST). Achieves accuracy competitive with the
+  best baseline while delivering 170x to 2070x inference speedup (median ~780x).
+authors:
+  - family-names: Purushothama
+    given-names: Sushanth
+    affiliation: "Department of Computer Science, Asia University, Taichung, Taiwan"
+    orcid: "https://orcid.org/0009-0007-6243-4479" 
+version: 1.0.0
+date-released: "2026-04-23"
+license: MIT
+repository-code: "https://github.com/sushanthaaa/Delaunay-Spatial-Classifier"
+type: software
+keywords:
+  - delaunay triangulation
+  - spatial classification
+  - computational geometry
+  - voronoi
+  - O(1) point location
+  - streaming data
+  - IEEE TKDE
+  - C++
+  - CGAL
+  - reproducibility
